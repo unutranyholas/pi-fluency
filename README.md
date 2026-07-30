@@ -68,7 +68,7 @@ accepted mistake rate = accepted occurrences / English words × 1000
 
 Stats covers trailing 30 local calendar days. It shows accepted rate, review coverage, one-off total, recurring patterns, and trends. Pattern list is sorted by accepted occurrence count. Pattern becomes recurring after at least two accepted occurrences across retained history; one-offs remain in overall accepted totals and rate but stay out of recurring-pattern list and toolbar count.
 
-README toolbar example uses portable emojis instead of Nerd Font glyphs:
+Toolbar summarizes current activity and accepted-mistake trends:
 
 ```text
 📥 12  💡 6  ▆▄▃▂▁▂▂  8.4/k
@@ -80,8 +80,6 @@ README toolbar example uses portable emojis instead of Nerd Font glyphs:
 | `💡 6` | 6 recurring patterns active during trailing 7 days |
 | `▆▄▃▂▁▂▂` | Seven rolling accepted-mistake rates |
 | `8.4/k` | Latest accepted mistakes per 1,000 English words |
-
-Actual Pi toolbar currently uses Nerd Font icons. Counts and rates remain readable when those glyphs are unavailable.
 
 ## Data and limitations
 
