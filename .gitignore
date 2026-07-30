@@ -1,0 +1,10 @@
+.pi/
+.pi-subagents/
+.superpowers/
+.ralph/
+/docs/superpowers/
+/MISTAKES.md
+node_modules/
+dist/
+coverage/
+*.log

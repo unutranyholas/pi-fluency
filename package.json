@@ -1,0 +1,63 @@
+{
+  "name": "pi-fluency",
+  "version": "0.1.0",
+  "description": "Learn from language mistakes in your Pi prompts",
+  "author": "Ihar Trafimovich",
+  "type": "module",
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "language-learning",
+    "grammar",
+    "writing"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/unutranyholas/pi-fluency.git"
+  },
+  "homepage": "https://github.com/unutranyholas/pi-fluency#readme",
+  "bugs": {
+    "url": "https://github.com/unutranyholas/pi-fluency/issues"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "files": [
+    "extensions/pi-fluency/*.ts",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit",
+    "check": "npm run typecheck && npm test",
+    "prepublishOnly": "npm run check"
+  },
+  "pi": {
+    "extensions": [
+      "./extensions/pi-fluency/index.ts"
+    ]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-ai": ">=0.80.10",
+    "@earendil-works/pi-coding-agent": ">=0.80.10",
+    "@earendil-works/pi-tui": ">=0.80.10"
+  },
+  "dependencies": {
+    "proper-lockfile": "^4.1.2"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-ai": "^0.83.0",
+    "@earendil-works/pi-coding-agent": "^0.83.0",
+    "@earendil-works/pi-tui": "^0.83.0",
+    "@types/node": "^22.0.0",
+    "@types/proper-lockfile": "^4.1.4",
+    "typescript": "^5.8.0",
+    "vitest": "^3.2.0"
+  },
+  "engines": {
+    "node": ">=22.19.0"
+  }
+}
