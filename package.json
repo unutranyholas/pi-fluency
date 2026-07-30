@@ -1,7 +1,7 @@
 {
   "name": "pi-fluency",
-  "version": "0.1.0",
-  "description": "Learn from language mistakes in your Pi prompts",
+  "version": "0.1.1",
+  "description": "English writing analytics for human-authored Pi prompts",
   "author": "Ihar Trafimovich",
   "type": "module",
   "keywords": [
