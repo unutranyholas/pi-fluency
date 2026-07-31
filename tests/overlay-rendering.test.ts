@@ -93,6 +93,83 @@ describe("FluencyOverlay rendering", () => {
     expect(text).not.toContain("Confirm");
   });
 
+  it("hanging-indents focused and unfocused Stats rules without rendered new annotations", () => {
+    const focusedExplanation = "Use an article before a singular countable noun.";
+    const unfocusedExplanation = "Prefer concrete wording when explaining each recurring issue.";
+    const stats: FluencyAnalytics = {
+      ...emptyStats,
+      rules: [
+        {
+          patternId: "hidden-focused",
+          rowKey: "focused-row",
+          explanation: focusedExplanation,
+          memberPatternKeys: ["hidden.focused"],
+          accepted: 5,
+          ratePerThousand: 5.7,
+          sparkline: "···▁▆██",
+          trend: "new",
+        },
+        {
+          patternId: "hidden-unfocused",
+          rowKey: "unfocused-row",
+          explanation: unfocusedExplanation,
+          memberPatternKeys: ["hidden.unfocused"],
+          accepted: 4,
+          ratePerThousand: 4.2,
+          sparkline: "▁▂▃▄▅▆▇",
+          trend: "stable",
+        },
+      ],
+      trendCounts: { improving: 0, worsening: 0, stable: 1, new: 1 },
+    };
+    const fixture = makeOverlay({
+      stats,
+      initialView: "stats",
+      rows: 60,
+      practice: {
+        settings: {
+          ...DEFAULT_PRACTICE_SETTINGS,
+          enabled: true,
+          consentedAt: 1,
+          targets: [{ explanation: focusedExplanation, memberPatternKeys: ["hidden.focused"] }],
+        },
+        targets: [{
+          explanation: focusedExplanation,
+          memberPatternKeys: ["hidden.focused"],
+          rowKey: "focused-row",
+          currentPatternKeys: ["hidden.focused"],
+          coachingEnabled: true,
+        }],
+        sessionSnoozed: false,
+        now: 1,
+      },
+    });
+
+    const rendered = fixture.overlay.render(42);
+    const output = plain(rendered);
+    const text = output.join("\n");
+    const firstTitleLine = output.find((line) => line.includes("> [x] Use"))!;
+    const wrappedTitleLine = output.find((line) => line.includes("countable"))!;
+    const metadataLine = output.find((line) => line.includes("5.7/k"))!;
+    const unfocusedTitleLine = output.find((line) => line.includes("[ ] Prefer"))!;
+    const unfocusedWrappedLine = output.find((line) => line.includes("recurring issue"))!;
+    const labelColumn = firstTitleLine.indexOf("Use");
+    const unfocusedLabelColumn = unfocusedTitleLine.indexOf("Prefer");
+
+    const focusedFixture = [
+      firstTitleLine.trimStart(),
+      wrappedTitleLine.slice(labelColumn - 6),
+      metadataLine.slice(labelColumn - 6),
+    ].join("\n");
+    expect(focusedFixture).toBe("> [x] Use an article before a singular\n      countable noun.\n      5.7/k  ···▁▆██");
+    expect(text).not.toContain("✦ new");
+    expect(text).not.toMatch(/\b\d+ new\b/);
+    expect(wrappedTitleLine.indexOf("countable")).toBe(labelColumn);
+    expect(metadataLine.indexOf("5.7/k")).toBe(labelColumn);
+    expect(unfocusedWrappedLine.indexOf("explaining")).toBe(unfocusedLabelColumn);
+    expect(rendered.every((line) => visibleWidth(line) <= 42)).toBe(true);
+  });
+
   it("renders empty Stats and wraps safely at narrow width", () => {
     const fixture = makeOverlay({ stats: emptyStats, initialView: "stats", rows: 60 });
     const rendered = fixture.overlay.render(40);

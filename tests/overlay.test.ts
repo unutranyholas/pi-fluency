@@ -631,7 +631,7 @@ describe("FluencyOverlay actions", () => {
   it("retains authoritative checkbox and focus on failure and freezes rule input while pending", async () => {
     const stats = {
       ...emptyStats,
-      rules: ["First rule", "Second rule"].map((explanation, index) => ({
+      rules: ["Use an article before a singular countable noun.", "Second rule"].map((explanation, index) => ({
         patternId: `private-${index}`, rowKey: `row-${index}`, explanation,
         memberPatternKeys: [`private.${index}`], accepted: 1, ratePerThousand: 1,
         sparkline: "▁▁▁▁▁▁▁", trend: "stable" as const,
@@ -644,9 +644,13 @@ describe("FluencyOverlay actions", () => {
       overrides: { setPracticeTarget: async () => { throw new Error("write failed\u001b"); } },
     });
     await failed.overlay.handleInput(" ");
-    const failedText = plain(failed.overlay.render(80)).join("\n");
-    expect(failedText).toContain("> [ ] First rule");
+    const failedLines = plain(failed.overlay.render(42));
+    const failedText = failedLines.join("\n");
+    const titleLine = failedLines.find((line) => line.includes("> [ ] Use"))!;
+    const actionErrorLine = failedLines.find((line) => line.includes("Action failed:"))!;
+    expect(failedText).toContain("> [ ] Use an article before a singular");
     expect(failedText).toContain("Action failed: write failed?");
+    expect(actionErrorLine.indexOf("Action failed:")).toBe(titleLine.indexOf("Use"));
 
     let release!: () => void;
     const pending = new Promise<void>((resolve) => { release = resolve; });
@@ -661,7 +665,7 @@ describe("FluencyOverlay actions", () => {
     await saving.overlay.handleInput("j");
     await saving.overlay.handleInput(" ");
     expect(mutation).toHaveBeenCalledOnce();
-    expect(plain(saving.overlay.render(80)).join("\n")).toContain("> [ ] First rule");
+    expect(plain(saving.overlay.render(80)).join("\n")).toContain("> [ ] Use an article before a singular countable noun.");
     release();
     await write;
   });

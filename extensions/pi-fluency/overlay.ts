@@ -564,8 +564,8 @@ export class FluencyOverlay implements Component {
     }
   }
 
-  private ruleTrend(rule: RuleAnalytics): string {
-    if (rule.trend === "new") return "✦ new";
+  private ruleTrend(rule: RuleAnalytics): string | undefined {
+    if (rule.trend === "new") return undefined;
     if (rule.trend === "stable") return "→";
     const arrow = rule.trend === "improving" ? "↓" : "↑";
     const change = rule.changePercent === undefined ? "" : `${Math.abs(Math.round(rule.changePercent))}%`;
@@ -579,6 +579,14 @@ export class FluencyOverlay implements Component {
       const wrapped = wrapTextWithAnsi(text, Math.max(1, width - 1));
       if (wrapped.length === 0) lines.push("");
       else for (const line of wrapped) lines.push(` ${line}`);
+      return { start, end: lines.length - 1 };
+    };
+    const appendHanging = (prefix: string, content: string): { start: number; end: number } => {
+      const available = Math.max(1, width - 1 - visibleWidth(prefix));
+      const wrapped = wrapTextWithAnsi(content, available);
+      const start = lines.length;
+      const continuation = " ".repeat(visibleWidth(prefix));
+      wrapped.forEach((line, index) => lines.push(` ${index === 0 ? prefix : continuation}${line}`));
       return { start, end: lines.length - 1 };
     };
     const periodRate = stats.periodRatePerThousand === undefined
@@ -602,7 +610,7 @@ export class FluencyOverlay implements Component {
     append(`Active rules        ${stats.activeRules.toLocaleString("en-US")}`);
     append();
     append("Concrete rules");
-    append(`↓ ${stats.trendCounts.improving} improving   ↑ ${stats.trendCounts.worsening} worsening   → ${stats.trendCounts.stable} stable   ✦ ${stats.trendCounts.new} new`);
+    append(`↓ ${stats.trendCounts.improving} improving   ↑ ${stats.trendCounts.worsening} worsening   → ${stats.trendCounts.stable} stable`);
     append();
 
     if (!practice) {
@@ -629,18 +637,20 @@ export class FluencyOverlay implements Component {
         if (label) append(label);
       }
       const marker = index === this.statsRuleIndex ? ">" : " ";
+      const prefix = `${marker} ${row.selected ? "[x]" : "[ ]"} `;
       const suffix = row.paused ? " · paused by Ignore" : "";
-      const title = append(`${marker} ${row.selected ? "[x]" : "[ ]"} ${row.target.explanation}${suffix}`);
+      const title = appendHanging(prefix, `${row.target.explanation}${suffix}`);
       let end = title.end;
       if (row.section === "recurring") {
         const rule = stats.rules.find((candidate) => candidate.rowKey === row.rowKey);
         if (rule) {
           const ruleRate = rule.ratePerThousand === undefined ? "—/k" : `${rule.ratePerThousand.toFixed(1)}/k`;
-          end = append(`${ruleRate}  ${this.ruleTrend(rule)}  ${rule.sparkline}`).end;
+          const metadata = [ruleRate, this.ruleTrend(rule), rule.sparkline].filter((field): field is string => Boolean(field));
+          end = appendHanging("      ", metadata.join("  ")).end;
         }
       }
       if (this.actionError && index === this.statsRuleIndex) {
-        end = append(`Action failed: ${this.actionError}`).end;
+        end = appendHanging("      ", `Action failed: ${this.actionError}`).end;
       }
       if (index === this.statsRuleIndex) focusedRange = { start: title.start, end };
     });
