@@ -786,10 +786,10 @@ describe("Pi Fluency extension", () => {
     expect(harness.notifications.at(-1)?.message).toContain("queued=0");
   });
 
-  it("opens Practice directly and supports consented on/off, resume, reset, and status", async () => {
+  it("opens bare practice in Stats and supports consented on/off, resume, reset, and status", async () => {
     const harness = await createExtensionHarness({ enabled: true });
     const openInbox = vi.fn<OpenInbox>(async (_ctx, _store, options) => {
-      expect(options.initialView).toBe("practice");
+      expect(options.initialView).toBe("stats");
     });
     createFluencyExtension({ ...harness.deps, openInbox })(harness.pi);
 

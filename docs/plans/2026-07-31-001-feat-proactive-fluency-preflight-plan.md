@@ -7,6 +7,8 @@ date: 2026-07-31
 
 # Proactive Fluency Preflight
 
+> **Historical implementation plan:** Initial U3 navigation below used `p` and a separate **Practice targets** view. Follow-up Stats work superseded that UI: rule checkboxes now live inline in Stats, Up/Down or `j`/`k` moves focus with focus-following scroll, Space toggles, and bare `/fluency practice` opens Stats. Direct `practice on|off|resume|reset` commands remain current. Original decisions and execution evidence stay below as historical record.
+
 ## Overview
 
 Add opt-in, submit-time practice to Pi Fluency. Users choose concrete recurring rules from Stats. When an eligible interactive prompt contains a selected mistake, Pi Fluency pauses submission, shows bounded coaching, keeps the exact received draft in the editor, and lets the user edit, send once, snooze for the current session, or snooze globally for five hours.
@@ -505,7 +507,7 @@ flowchart TB
 
 **Execution evidence:**
 - Installed this checkout through real Pi package discovery with `HOME` and `PI_CODING_AGENT_DIR` both isolated under a temporary root.
-- Real Pi v0.82.0 loaded `pi-fluency`; `/fluency stats` rendered zeroed Stats and `/fluency practice` rendered Practice mode, selection, snooze state, empty state, and keyboard controls.
+- Real Pi v0.82.0 loaded `pi-fluency`; at that implementation stage, `/fluency stats` rendered zeroed Stats and `/fluency practice` rendered the now-superseded separate Practice mode, selection, snooze state, empty state, and keyboard controls.
 - Isolated extension storage contained only fresh zero-byte history plus generation metadata at mode `0600`; temporary root was deleted after each probe. No real history was edited or cleared.
 - Full decision paths that require seeded recurring history or analyzer outcomes are covered by the real extension event harness and manual fake extension rather than production user data.
 

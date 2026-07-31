@@ -50,8 +50,8 @@ Useful commands:
 | Command | Action |
 | --- | --- |
 | `/fluency` | Set up Pi Fluency or open Inbox |
-| `/fluency stats` | Open 30-day analytics |
-| `/fluency practice` | Choose recurring rules and inspect practice state |
+| `/fluency stats` | Open 30-day analytics and choose recurring rules |
+| `/fluency practice` | Open Stats |
 | `/fluency practice on` / `off` | Enable or bypass selected-rule practice |
 | `/fluency practice resume` | End current session and five-hour snoozes |
 | `/fluency practice reset` | Confirm, then clear practice selections and consent |
@@ -65,7 +65,7 @@ Useful commands:
 
 ## Practice selected rules
 
-Practice is an optional analytical aid, not comprehensive grammar checking, automatic correction, or English instruction. From Stats, press `p` to open **Practice targets**, then select concrete recurring rules. First activation asks for separate preflight consent: eligible sanitized prompt prose may reach configured Fluency model before main request proceeds, including a draft you later keep instead of sending.
+Practice is an optional analytical aid, not comprehensive grammar checking, automatic correction, or English instruction. Stats shows recurring rules as inline `[ ]` or `[x]` rows. First rule starts focused; use Up/Down or `j`/`k` to move focus and keep focused row in view, then press Space to toggle it. First activation asks for separate preflight consent: eligible sanitized prompt prose may reach configured Fluency model before main request proceeds, including a draft you later keep instead of sending.
 
 For idle, text-only interactive prompts, Pi Fluency checks selected rules at submit time. This sends full sanitized prose from eligible prompt to analysis provider and can add provider latency, bounded to one attempt within about six seconds. Editor keeps exact text Pi Fluency received while check runs. Clean result proceeds normally. Match opens checkpoint without rewriting text:
 
@@ -87,7 +87,7 @@ Pi Fluency counts only findings you accept. Every analyzer-classified English pr
 accepted mistake rate = accepted occurrences / English words × 1000
 ```
 
-Stats covers trailing 30 local calendar days. It shows accepted rate, review coverage, one-off total, recurring patterns, and trends. Pattern list is sorted by accepted occurrence count. Pattern becomes recurring after accepted findings appear in at least two distinct prompts across retained history; one-offs remain in overall accepted totals and rate but stay out of recurring-pattern list and toolbar count.
+Stats covers trailing 30 local calendar days. Its normalized chart always has 30 positions, labeled from `30 days ago` through `today`; `·` means no English words were recorded for that local day. It also shows accepted rate, review coverage, one-off total, recurring patterns, and trends. Pattern list is sorted by accepted occurrence count. Pattern becomes recurring after accepted findings appear in at least two distinct prompts across retained history; one-offs remain in overall accepted totals and rate but stay out of recurring-pattern list and toolbar count.
 
 Toolbar summarizes current activity and accepted-mistake trends:
 

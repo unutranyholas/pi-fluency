@@ -11,11 +11,11 @@ import { createFluencyExtension } from "../../extensions/pi-fluency/index.js";
  *   PI_FLUENCY_MANUAL_RUN=u6 pi --no-extensions -e ./tests/manual/fake-extension.ts
  *
  * Setup, then send two distinct prompts containing "an mistake" and accept both
- * occurrences. Open `/fluency stats`, press `p`, and select displayed rule.
- * Exercise clean send, Edit/Esc, Send once, both snoozes, and
- * `/fluency practice resume`. Resize terminal while Practice targets and match
- * overlays are open. A prompt containing both "an mistake" and
- * "fluency manual timeout" simulates abort-ignoring adapter; later prompts fail
+ * occurrences. Open `/fluency stats`; first rule is focused. Use Up/Down or j/k
+ * to move focus and Space to toggle its inline checkbox. Exercise clean send,
+ * Edit/Esc, Send once, both snoozes, and `/fluency practice resume`. Resize
+ * terminal while Stats and match overlays are open. A prompt containing both
+ * "an mistake" and "fluency manual timeout" simulates abort-ignoring adapter; later prompts fail
  * open until process restart. Reuse PI_FLUENCY_MANUAL_RUN across restart to keep
  * temp-only practice state. "fluency manual error" simulates provider failure.
  */
