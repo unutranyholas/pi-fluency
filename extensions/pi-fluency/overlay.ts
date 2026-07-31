@@ -31,7 +31,7 @@ import {
   type ErrantCategory,
 } from "./taxonomy.js";
 
-export type FluencyView = "inbox" | "accepted" | "ignored" | "stats" | "practice";
+export type FluencyView = "inbox" | "accepted" | "ignored" | "stats";
 type SelectionKeybinding =
   | "tui.select.up"
   | "tui.select.down"
@@ -65,9 +65,6 @@ export interface FluencyOverlayOptions {
   restoreIgnored(targets: IgnoreTarget[], pattern: ReviewPattern): MaybePromise;
   activatePractice?(target?: PracticeTarget): MaybePromise;
   setPracticeTarget?(target: PracticeTarget, selected: boolean): MaybePromise;
-  setPracticeEnabled?(enabled: boolean): MaybePromise;
-  resumePractice?(): MaybePromise;
-  resetPractice?(): MaybePromise;
   close(): void;
   viewChanged?(view: FluencyView): void;
   mutationError?(error: unknown): void;
@@ -81,7 +78,7 @@ const FOOTER_LINES = 3;
 const BORDER_LINES = 2;
 const DETAIL_SCROLL_STEP = 5;
 
-interface PracticeRow {
+interface StatsRuleRow {
   rowKey: string;
   target: PracticeTarget;
   selected: boolean;
@@ -89,7 +86,10 @@ interface PracticeRow {
   section: "recurring" | "historical" | "paused";
 }
 
-type PracticeConfirmation = { kind: "consent"; target?: PracticeTarget } | { kind: "reset" };
+interface StatsBody {
+  lines: string[];
+  focusedRange?: { start: number; end: number };
+}
 
 interface SourceSegment {
   text: string;
@@ -186,12 +186,9 @@ export class FluencyOverlay implements Component {
   private disposed = false;
   private loadError: string | undefined;
   private actionError: string | undefined;
-  private practiceIndex = 0;
-  private practiceFocusKey: string | undefined;
-  private practicePending = false;
-  private practiceConfirmation: PracticeConfirmation | undefined;
-  private confirmationCancelFocused = true;
-  private practiceResetComplete = false;
+  private statsRuleIndex = 0;
+  private statsRuleFocusKey: string | undefined;
+  private statsRulePending = false;
   private callbacks: FluencyOverlayOptions | undefined;
 
   constructor(options: FluencyOverlayOptions) {
@@ -225,7 +222,7 @@ export class FluencyOverlay implements Component {
   }
 
   private items(): ReviewPattern[] {
-    if (this.view === "stats" || this.view === "practice") return [];
+    if (this.view === "stats") return [];
     const items = this.getPatterns().filter((pattern) => {
       const ignored = this.ignoredBy(pattern).length > 0;
       if (this.view === "ignored") return ignored;
@@ -286,9 +283,9 @@ export class FluencyOverlay implements Component {
     }
   }
 
-  private practiceRows(stats: FluencyAnalytics, practice: PracticeOverlayState): PracticeRow[] {
+  private statsRuleRows(stats: FluencyAnalytics, practice: PracticeOverlayState): StatsRuleRow[] {
     const selectedByExplanation = new Map(practice.targets.map((target) => [target.explanation, target]));
-    const recurring: PracticeRow[] = stats.rules.flatMap((rule) => {
+    const recurring: StatsRuleRow[] = stats.rules.flatMap((rule) => {
       const selected = selectedByExplanation.get(rule.explanation);
       if (selected && !selected.coachingEnabled) return [];
       return [{
@@ -300,7 +297,7 @@ export class FluencyOverlay implements Component {
       }];
     });
     const recurringExplanations = new Set(stats.rules.map((rule) => rule.explanation));
-    const historical: PracticeRow[] = practice.targets
+    const historical: StatsRuleRow[] = practice.targets
       .filter((target) => target.coachingEnabled && !recurringExplanations.has(target.explanation))
       .map((target) => ({
         rowKey: target.rowKey,
@@ -309,7 +306,7 @@ export class FluencyOverlay implements Component {
         paused: false,
         section: "historical" as const,
       }));
-    const paused: PracticeRow[] = practice.targets
+    const paused: StatsRuleRow[] = practice.targets
       .filter((target) => !target.coachingEnabled)
       .map((target) => ({
         rowKey: target.rowKey,
@@ -319,146 +316,63 @@ export class FluencyOverlay implements Component {
         section: "paused" as const,
       }));
     const rows = [...recurring, ...historical, ...paused];
-    if (this.practiceFocusKey) {
-      const index = rows.findIndex((row) => row.rowKey === this.practiceFocusKey);
-      if (index >= 0) this.practiceIndex = index;
+    if (this.statsRuleFocusKey) {
+      const index = rows.findIndex((row) => row.rowKey === this.statsRuleFocusKey);
+      if (index >= 0) this.statsRuleIndex = index;
     }
-    this.practiceIndex = Math.max(0, Math.min(this.practiceIndex, Math.max(0, rows.length - 1)));
-    this.practiceFocusKey = rows[this.practiceIndex]?.rowKey;
+    this.statsRuleIndex = Math.max(0, Math.min(this.statsRuleIndex, Math.max(0, rows.length - 1)));
+    this.statsRuleFocusKey = rows[this.statsRuleIndex]?.rowKey;
     return rows;
   }
 
-  private async performPractice(action: () => MaybePromise, focusKey?: string): Promise<boolean> {
-    if (this.practicePending) return false;
+  private async performStatsRule(action: () => MaybePromise, focusKey: string): Promise<void> {
+    if (this.statsRulePending) return;
     this.clearActionError();
-    this.practicePending = true;
+    this.statsRulePending = true;
     this.changed();
     try {
       await action();
-      if (this.disposed) return false;
+      if (this.disposed) return;
       this.actionError = undefined;
-      return true;
     } catch (error) {
-      if (this.disposed) return false;
+      if (this.disposed) return;
       this.actionError = sanitizedError(error);
-      this.practiceFocusKey = focusKey;
+      this.statsRuleFocusKey = focusKey;
       try { this.callbacks?.mutationError?.(error); } catch { /* advisory */ }
-      return false;
     } finally {
       if (!this.disposed) {
-        this.practicePending = false;
+        this.statsRulePending = false;
         this.changed();
       }
     }
   }
 
-  private cancelPracticeConfirmation(): void {
-    this.practiceConfirmation = undefined;
-    this.confirmationCancelFocused = true;
-    this.changed();
-  }
-
-  private async activatePracticeConfirmation(): Promise<void> {
-    const confirmation = this.practiceConfirmation;
-    const callbacks = this.callbacks;
-    if (!confirmation || !callbacks) return;
-    if (this.confirmationCancelFocused) {
-      this.cancelPracticeConfirmation();
-      return;
-    }
-    this.practiceConfirmation = undefined;
-    if (confirmation.kind === "reset") {
-      const reset = await this.performPractice(() => callbacks.resetPractice?.());
-      if (reset) {
-        this.practiceIndex = 0;
-        this.practiceFocusKey = undefined;
-        this.practiceResetComplete = true;
-      }
-      return;
-    }
-    await this.performPractice(() => callbacks.activatePractice?.(confirmation.target), this.practiceFocusKey);
-  }
-
-  private async handlePracticeInput(data: string): Promise<void> {
-    const callbacks = this.callbacks;
-    if (!callbacks || this.practicePending) return;
-    if (this.practiceConfirmation) {
-      if (callbacks.keybindings.matches(data, "tui.select.cancel")) this.cancelPracticeConfirmation();
-      else if (matchesKey(data, Key.left) || matchesKey(data, Key.right) || data === "\t" || matchesKey(data, Key.tab)) {
-        this.confirmationCancelFocused = !this.confirmationCancelFocused;
-        this.changed();
-      } else if (data === "\r" || data === "\n") await this.activatePracticeConfirmation();
-      return;
-    }
-    if (callbacks.keybindings.matches(data, "tui.select.cancel")) {
-      this.view = "stats";
-      this.resetDetailPaging();
-      callbacks.viewChanged?.("stats");
-      this.changed();
-      return;
-    }
-    if (this.practiceResetComplete) {
-      if (data === "\r" || data === "\n") {
-        this.view = "stats";
-        callbacks.viewChanged?.("stats");
-        this.changed();
-      }
-      return;
-    }
+  private moveStatsRuleFocus(direction: -1 | 1): void {
+    if (this.statsRulePending) return;
     const stats = this.getStats();
     const practice = this.getPractice();
     if (!stats || !practice) return;
-    const rows = this.practiceRows(stats, practice);
-    if (callbacks.keybindings.matches(data, "tui.select.up") || data === "k") {
-      this.practiceIndex = Math.max(0, this.practiceIndex - 1);
-      this.practiceFocusKey = rows[this.practiceIndex]?.rowKey;
-      this.clearActionError();
-      this.changed();
+    const rows = this.statsRuleRows(stats, practice);
+    this.statsRuleIndex = Math.max(0, Math.min(rows.length - 1, this.statsRuleIndex + direction));
+    this.statsRuleFocusKey = rows[this.statsRuleIndex]?.rowKey;
+    this.clearActionError();
+    this.changed();
+  }
+
+  private async toggleFocusedStatsRule(): Promise<void> {
+    if (this.statsRulePending) return;
+    const callbacks = this.callbacks;
+    const stats = this.getStats();
+    const practice = this.getPractice();
+    if (!callbacks || !stats || !practice) return;
+    const rows = this.statsRuleRows(stats, practice);
+    const row = rows[this.statsRuleIndex];
+    if (!row) return;
+    if (!row.selected && practice.settings.consentedAt === undefined) {
+      await this.performStatsRule(() => callbacks.activatePractice?.(row.target), row.rowKey);
       return;
     }
-    if (callbacks.keybindings.matches(data, "tui.select.down") || data === "j") {
-      this.practiceIndex = Math.min(Math.max(0, rows.length - 1), this.practiceIndex + 1);
-      this.practiceFocusKey = rows[this.practiceIndex]?.rowKey;
-      this.clearActionError();
-      this.changed();
-      return;
-    }
-    if ((data === "\r" || data === "\n") && rows.length === 0) {
-      this.view = "stats";
-      callbacks.viewChanged?.("stats");
-      this.changed();
-      return;
-    }
-    if (data === " " && rows.length > 0) {
-      const row = rows[this.practiceIndex]!;
-      if (!row.selected && practice.settings.consentedAt === undefined) {
-        this.practiceConfirmation = { kind: "consent", target: row.target };
-        this.confirmationCancelFocused = true;
-        this.changed();
-        return;
-      }
-      await this.performPractice(() => callbacks.setPracticeTarget?.(row.target, !row.selected), row.rowKey);
-      return;
-    }
-    if (data === "x") {
-      if (!practice.settings.enabled && practice.settings.consentedAt === undefined) {
-        this.practiceConfirmation = { kind: "consent" };
-        this.confirmationCancelFocused = true;
-        this.changed();
-        return;
-      }
-      await this.performPractice(() => callbacks.setPracticeEnabled?.(!practice.settings.enabled));
-      return;
-    }
-    if (data === "r" && (practice.sessionSnoozed || (practice.settings.snoozedUntil ?? 0) > practice.now)) {
-      await this.performPractice(() => callbacks.resumePractice?.());
-      return;
-    }
-    if (data === "c") {
-      this.practiceConfirmation = { kind: "reset" };
-      this.confirmationCancelFocused = true;
-      this.changed();
-    }
+    await this.performStatsRule(() => callbacks.setPracticeTarget?.(row.target, !row.selected), row.rowKey);
   }
 
   async handleInput(data: string): Promise<void> {
@@ -466,24 +380,23 @@ export class FluencyOverlay implements Component {
     if (this.disposed || !callbacks) return;
     const items = this.items();
 
-    if (this.view === "practice") {
-      await this.handlePracticeInput(data);
-      return;
-    }
     if (callbacks.keybindings.matches(data, "tui.select.cancel")) {
       callbacks.close();
       return;
     }
-    if (data === "p" && this.view === "stats") {
-      this.clearActionError();
-      this.view = "practice";
-      this.practiceIndex = 0;
-      this.practiceFocusKey = undefined;
-      this.practiceResetComplete = false;
-      this.resetDetailPaging();
-      callbacks.viewChanged?.("practice");
-      this.changed();
-      return;
+    if (this.view === "stats") {
+      if (callbacks.keybindings.matches(data, "tui.select.up") || data === "k") {
+        this.moveStatsRuleFocus(-1);
+        return;
+      }
+      if (callbacks.keybindings.matches(data, "tui.select.down") || data === "j") {
+        this.moveStatsRuleFocus(1);
+        return;
+      }
+      if (data === " ") {
+        await this.toggleFocusedStatsRule();
+        return;
+      }
     }
     if (data === "\t" || matchesKey(data, Key.tab)) {
       this.clearActionError();
@@ -654,24 +567,25 @@ export class FluencyOverlay implements Component {
     return `${arrow}${change}`;
   }
 
-  private statsLines(stats: FluencyAnalytics, width: number, practice?: PracticeOverlayState): string[] {
-    const body: string[] = [];
-    const append = (text = ""): void => {
+  private statsBody(stats: FluencyAnalytics, width: number, practice?: PracticeOverlayState): StatsBody {
+    const lines: string[] = [];
+    const append = (text = ""): { start: number; end: number } => {
+      const start = lines.length;
       const wrapped = wrapTextWithAnsi(text, Math.max(1, width - 1));
-      if (wrapped.length === 0) body.push("");
-      else for (const line of wrapped) body.push(` ${line}`);
+      if (wrapped.length === 0) lines.push("");
+      else for (const line of wrapped) lines.push(` ${line}`);
+      return { start, end: lines.length - 1 };
     };
     const periodRate = stats.periodRatePerThousand === undefined
       ? "—"
       : stats.periodRatePerThousand.toFixed(1);
-    const currentRate = stats.currentRatePerThousand === undefined
-      ? "—"
-      : stats.currentRatePerThousand.toFixed(1);
     const coverage = stats.reviewCoverage === undefined
       ? "—"
       : `${Math.round(stats.reviewCoverage * 100)}%`;
 
-    append("Fluency trend · 30 days");
+    append("Mistakes / 1,000 words · last 30 days");
+    append(`${stats.dailyRateSparkline}  ${periodRate}/k`);
+    append("30 days ago ... today");
     append();
     append(`Accepted rate       ${periodRate} / 1000 English words`);
     append(`English words       ${stats.englishWords.toLocaleString("en-US")}`);
@@ -681,23 +595,51 @@ export class FluencyOverlay implements Component {
     append(`Pending             ${stats.periodPendingOccurrences.toLocaleString("en-US")}`);
     append(`Review coverage     ${coverage}`);
     append(`Active rules        ${stats.activeRules.toLocaleString("en-US")}`);
-    append(`${stats.toolbarSparkline}  ${currentRate === "—" ? "—/k" : `${currentRate}/k`}`);
     append();
     append("Concrete rules");
     append(`↓ ${stats.trendCounts.improving} improving   ↑ ${stats.trendCounts.worsening} worsening   → ${stats.trendCounts.stable} stable   ✦ ${stats.trendCounts.new} new`);
     append();
-    if (stats.rules.length === 0) {
-      append("No recurring concrete rules in this period.");
-    } else {
-      const selected = new Set(practice?.settings.targets.map((target) => target.explanation) ?? []);
-      for (const rule of stats.rules) {
-        append(`${selected.has(rule.explanation) ? "[Selected for practice] " : ""}${rule.explanation}`);
-        const ruleRate = rule.ratePerThousand === undefined ? "—/k" : `${rule.ratePerThousand.toFixed(1)}/k`;
-        append(`${ruleRate}  ${this.ruleTrend(rule)}  ${rule.sparkline}`);
-        append();
-      }
+
+    if (!practice) {
+      if (stats.rules.length === 0) append("No recurring concrete rules in this period.");
+      return { lines };
     }
-    return body;
+    const rows = this.statsRuleRows(stats, practice);
+    if (rows.length === 0) {
+      append("No recurring concrete rules in this period.");
+      return { lines };
+    }
+
+    const labels: Partial<Record<StatsRuleRow["section"], string>> = {
+      historical: "Selected, not currently recurring",
+      paused: "Selected, paused by Ignore",
+    };
+    let section: StatsRuleRow["section"] | undefined;
+    let focusedRange: StatsBody["focusedRange"];
+    rows.forEach((row, index) => {
+      if (row.section !== section) {
+        if (section !== undefined) append();
+        section = row.section;
+        const label = labels[section];
+        if (label) append(label);
+      }
+      const marker = index === this.statsRuleIndex ? ">" : " ";
+      const suffix = row.paused ? " · paused by Ignore" : "";
+      const title = append(`${marker} ${row.selected ? "[x]" : "[ ]"} ${row.target.explanation}${suffix}`);
+      let end = title.end;
+      if (row.section === "recurring") {
+        const rule = stats.rules.find((candidate) => candidate.rowKey === row.rowKey);
+        if (rule) {
+          const ruleRate = rule.ratePerThousand === undefined ? "—/k" : `${rule.ratePerThousand.toFixed(1)}/k`;
+          end = append(`${ruleRate}  ${this.ruleTrend(rule)}  ${rule.sparkline}`).end;
+        }
+      }
+      if (this.actionError && index === this.statsRuleIndex) {
+        end = append(`Action failed: ${this.actionError}`).end;
+      }
+      if (index === this.statsRuleIndex) focusedRange = { start: title.start, end };
+    });
+    return { lines, ...(focusedRange ? { focusedRange } : {}) };
   }
 
   private visibleStatsLines(stats: FluencyAnalytics, width: number, available: number, practice?: PracticeOverlayState): string[] {
@@ -705,81 +647,33 @@ export class FluencyOverlay implements Component {
       this.resetDetailPaging();
       return [];
     }
-    const body = this.statsLines(stats, width, practice);
-    this.maxDetailOffset = Math.max(0, body.length - available);
+    const body = this.statsBody(stats, width, practice);
+    this.maxDetailOffset = Math.max(0, body.lines.length - available);
     this.detailOffset = Math.min(this.detailOffset, this.maxDetailOffset);
-    return body.slice(this.detailOffset, this.detailOffset + available);
-  }
-
-  private practiceBodyLines(stats: FluencyAnalytics, practice: PracticeOverlayState, width: number): string[] {
-    const rows = this.practiceRows(stats, practice);
-    const lines: string[] = [];
-    const append = (text = ""): void => {
-      const wrapped = wrapTextWithAnsi(text, Math.max(1, width - 1));
-      if (wrapped.length === 0) lines.push("");
-      else wrapped.forEach((line) => lines.push(` ${line}`));
-    };
-    if (this.practiceResetComplete) {
-      append("Practice reset. Selections, consent, mode, and snoozes cleared.");
-      append("> Focused · Back to Stats (Enter or Esc)");
-      return lines;
-    }
-    const globalSnoozed = (practice.settings.snoozedUntil ?? 0) > practice.now;
-    append(`Practice mode: ${practice.settings.enabled ? "On" : "Off"}`);
-    append(`Selected targets: ${practice.settings.targets.length}`);
-    append(`Snooze: ${practice.sessionSnoozed && globalSnoozed ? "Session and 5-hour snooze active" : practice.sessionSnoozed ? "Session snooze active" : globalSnoozed ? "5-hour snooze active" : "Not snoozed"}`);
-    append();
-    if (rows.length === 0) {
-      append("No recurring rules or saved practice targets.");
-      if (this.actionError) append(`Action failed: ${this.actionError}`);
-      append("> Focused · Back to Stats (Enter or Esc)");
-      return lines;
-    }
-    const labels: Record<PracticeRow["section"], string> = {
-      recurring: "Recurring choices",
-      historical: "Selected, not currently recurring",
-      paused: "Selected, paused by Ignore",
-    };
-    let section: PracticeRow["section"] | undefined;
-    rows.forEach((row, index) => {
-      if (row.section !== section) {
-        if (section !== undefined) append();
-        section = row.section;
-        append(labels[section]);
+    const focused = body.focusedRange;
+    if (focused) {
+      const focusHeight = focused.end - focused.start + 1;
+      if (focusHeight > available) {
+        this.detailOffset = focused.start;
+      } else if (focused.start < this.detailOffset) {
+        this.detailOffset = focused.start;
+      } else if (focused.end >= this.detailOffset + available) {
+        this.detailOffset = focused.end - available + 1;
       }
-      const focus = index === this.practiceIndex ? "> Focused" : "  Not focused";
-      const state = row.paused ? "selected, paused" : row.selected ? "selected" : "not selected";
-      append(`${focus} · [${state}] ${row.target.explanation}`);
-      if (this.actionError && index === this.practiceIndex) append(`Action failed: ${this.actionError}`);
-    });
-    return lines;
-  }
-
-  private confirmationLines(width: number): string[] {
-    const confirmation = this.practiceConfirmation;
-    if (!confirmation) return [];
-    const message = confirmation.kind === "consent"
-      ? "Preflight disclosure: Before main submission, full sanitized draft goes to configured Fluency model. Draft may be analyzed even if you later choose not to send it."
-      : "Reset practice? This clears selected targets, consent, practice mode, and snoozes. Fluency history stays unchanged.";
-    return wrapTextWithAnsi(message, Math.max(1, width - 2)).map((line) => ` ${line}`);
+      this.detailOffset = Math.max(0, Math.min(this.detailOffset, this.maxDetailOffset));
+    }
+    return body.lines.slice(this.detailOffset, this.detailOffset + available);
   }
 
   private footerLines(contentWidth: number): string[] {
-    if (this.view === "stats") return [" ↑↓/jk scroll  pgup/pgdn  p practice targets", " tab view  esc close"];
-    if (this.view !== "practice") {
-      if (this.view === "inbox") return [" ←→ card  ↑↓/jk scroll  a accept  d dismiss", " i ignore  tab view  esc close"];
-      return [" ←→ card  ↑↓/jk scroll", this.view === "ignored" ? " u restore all  tab view  esc close" : " i ignore  tab view  esc close"];
+    if (this.view === "stats") {
+      const text = this.statsRulePending
+        ? " Saving…   focus and toggle disabled"
+        : " ↑↓/jk focus + scroll   Space toggle   tab view   esc close";
+      return wrapTextWithAnsi(text, Math.max(1, contentWidth));
     }
-    if (this.practicePending) return [" Saving…", " Esc disabled while saving"];
-    if (this.practiceConfirmation) {
-      const actions = this.confirmationCancelFocused ? " > Cancel · Confirm" : "   Cancel · > Confirm";
-      return contentWidth < 40
-        ? [actions, " ←→/Tab choose", " Enter activate · Esc cancel"]
-        : [actions, " Left/Right or Tab choose · Enter activate · Esc cancel"];
-    }
-    return contentWidth < 40
-      ? [" ↑↓/jk · Space toggle", " x practice on/off", " r resume now", " c reset practice", " Esc back to Stats"]
-      : [" ↑↓/jk move  Space toggle  x practice on/off", " r resume now  c reset practice  esc back to Stats"];
+    if (this.view === "inbox") return [" ←→ card  ↑↓/jk scroll  a accept  d dismiss", " i ignore  tab view  esc close"];
+    return [" ←→ card  ↑↓/jk scroll", this.view === "ignored" ? " u restore all  tab view  esc close" : " i ignore  tab view  esc close"];
   }
 
   render(width: number): string[] {
@@ -790,15 +684,13 @@ export class FluencyOverlay implements Component {
     const budget = this.verticalBudget();
     const innerBudget = Math.max(0, budget - BORDER_LINES);
     const items = this.items();
-    const stats = this.view === "stats" || this.view === "practice" ? this.getStats() : undefined;
-    const practice = (this.view === "stats" || this.view === "practice") && stats ? this.getPractice() : undefined;
+    const stats = this.view === "stats" ? this.getStats() : undefined;
+    const practice = this.view === "stats" && stats ? this.getPractice() : undefined;
     const title = ` Pi Fluency · ${this.view[0]!.toUpperCase()}${this.view.slice(1)}`;
     const noun = this.view === "inbox" ? "pending" : this.view;
     const selected = items[this.selectedIndex];
     const paging = this.view === "stats"
       ? "30 days"
-      : this.view === "practice"
-        ? "keyboard targets"
       : selected
         ? `Pending ${selected.pendingCount} · accepted ${selected.acceptedCount} · ← ${this.selectedIndex + 1} / ${items.length} →`
         : `0 ${noun}`;
@@ -811,22 +703,10 @@ export class FluencyOverlay implements Component {
 
     if (this.loadError) {
       this.resetDetailPaging();
-      lines.push(` Could not load ${this.view === "stats" ? "statistics" : this.view === "practice" ? "practice settings" : "patterns"}: ${this.loadError}`);
+      lines.push(` Could not load ${this.view === "stats" ? "statistics" : "patterns"}: ${this.loadError}`);
     } else if (this.view === "stats" && stats) {
       const reserved = headerLines.length + 2 + footerLines.length;
       lines.push(...this.visibleStatsLines(stats, contentWidth, Math.max(1, innerBudget - reserved), practice));
-    } else if (this.view === "practice" && stats && practice) {
-      const reserved = headerLines.length + 2 + footerLines.length;
-      const available = Math.max(1, innerBudget - reserved);
-      if (this.practiceConfirmation) {
-        lines.push(...this.confirmationLines(contentWidth).slice(0, available));
-      } else {
-        const body = this.practiceBodyLines(stats, practice, contentWidth);
-        // Keep focused row visible at short heights while preserving section context when possible.
-        const focusedLine = body.findIndex((line) => line.includes("> Focused"));
-        const start = focusedLine < 0 ? 0 : Math.max(0, Math.min(focusedLine - 2, body.length - available));
-        lines.push(...body.slice(start, start + available));
-      }
     } else {
       if (this.actionError) lines.push(` Action failed: ${this.actionError}`);
       if (items.length === 0) {
@@ -955,16 +835,6 @@ export async function showFluencyOverlay(
           },
           activatePractice: (target) => store.activatePractice(now(), target),
           setPracticeTarget: (target, selected) => store.setPracticeTarget(target, selected),
-          setPracticeEnabled: (enabled) => store.setPracticeEnabled(enabled),
-          resumePractice: async () => {
-            const practice = store.getPracticeSettings();
-            const sessionSnoozed = practiceRuntime?.sessionSnoozed() ?? false;
-            const globalSnoozed = (practice.snoozedUntil ?? 0) > now();
-            // Session entry first: if it fails, durable global state stays untouched.
-            if (sessionSnoozed) practiceRuntime?.resumeSession();
-            if (globalSnoozed) await store.resumePractice();
-          },
-          resetPractice: () => store.resetPractice(),
           ...(onMutationError ? { mutationError: onMutationError } : {}),
           close: () => done(),
         });

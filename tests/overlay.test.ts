@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   FluencyOverlay,
   type IgnoreTarget,
+  type PracticeOverlayState,
   showFluencyOverlay,
 } from "../extensions/pi-fluency/overlay.js";
 import type { FluencyStore } from "../extensions/pi-fluency/store.js";
@@ -15,7 +16,7 @@ import {
 } from "./helpers/overlay-fixtures.js";
 
 describe("FluencyOverlay actions", () => {
-  it("keeps every mutation key inert in read-only Stats", async () => {
+  it("keeps inbox mutation keys inert in Stats", async () => {
     const fixture = makeOverlay({ initialView: "stats" });
     for (const key of ["a", "l", "d", "i", "u"]) await fixture.overlay.handleInput(key);
     expect(fixture.actions).toEqual([]);
@@ -519,63 +520,56 @@ describe("FluencyOverlay actions", () => {
     expect(plain(fixture.overlay.render(60)).join("\n")).toContain("Action failed: write failed");
   });
 
-  it("opens keyboard Practice targets from Stats and requires safely focused consent", async () => {
-    const fixture = makeOverlay({
-      initialView: "stats",
-      stats: {
-        pendingOccurrences: 0,
-        periodPendingOccurrences: 0,
-        activeRules: 1,
-        toolbarSparkline: "·······",
-        dailyRateSparkline: "·".repeat(30),
-        englishWords: 100,
+  it("focuses Stats rules and toggles consent atomically without a modal", async () => {
+    const stats = {
+      ...emptyStats,
+      rules: ["First recurring rule", "Second recurring rule"].map((explanation, index) => ({
+        patternId: `private-${index}`,
+        rowKey: `row-${index}`,
+        explanation,
+        memberPatternKeys: [`private.key.${index}`],
         accepted: 2,
-        dismissed: 0,
-        oneOffAccepted: 0,
-        rules: [{
-          patternId: "private-id",
-          rowKey: "private-row",
-          explanation: "Use a before consonant sounds.",
-          memberPatternKeys: ["private.pattern.key"],
-          accepted: 2,
-          ratePerThousand: 20,
-          sparkline: "▁▁▁▁▁▁▁",
-          trend: "stable",
-        }],
-        trendCounts: { improving: 0, worsening: 0, stable: 1, new: 0 },
-      },
-    });
+        ratePerThousand: 20,
+        sparkline: "▁▁▁▁▁▁▁",
+        trend: "stable" as const,
+      })),
+      trendCounts: { improving: 0, worsening: 0, stable: 2, new: 0 },
+    };
+    const fixture = makeOverlay({ initialView: "stats", stats, rows: 60 });
 
-    await fixture.overlay.handleInput("p");
-    expect(plain(fixture.overlay.render(80)).join("\n")).toContain("Recurring choices");
-    await fixture.overlay.handleInput(" ");
-    const disclosure = plain(fixture.overlay.render(80)).join("\n");
-    expect(disclosure).toContain("full sanitized draft");
-    expect(disclosure).toContain("> Cancel");
-    await fixture.overlay.handleInput("\r");
-    expect(fixture.actions).not.toContainEqual(expect.stringContaining("practice-consent"));
+    expect(plain(fixture.overlay.render(80)).join("\n")).toContain("> [ ] First recurring rule");
+    const renders = fixture.tui.requestRender.mock.calls.length;
+    await fixture.overlay.handleInput("j");
+    expect(fixture.tui.requestRender.mock.calls.length).toBeGreaterThan(renders);
+    expect(plain(fixture.overlay.render(80)).join("\n")).toContain("> [ ] Second recurring rule");
+    await fixture.overlay.handleInput("k");
+    expect(plain(fixture.overlay.render(80)).join("\n")).toContain("> [ ] First recurring rule");
 
     await fixture.overlay.handleInput(" ");
-    await fixture.overlay.handleInput("\u001b[C");
-    await fixture.overlay.handleInput("\r");
-    expect(fixture.actions).toContain("practice-consent:Use a before consonant sounds.");
+    expect(fixture.actions).toContain("practice-consent:First recurring rule");
     const selected = plain(fixture.overlay.render(80)).join("\n");
-    expect(selected).toContain("Practice mode: On");
-    expect(selected).toContain("[selected] Use a before consonant sounds.");
+    expect(selected).toContain("> [x] First recurring rule");
+    expect(selected).not.toContain("full sanitized draft");
+    expect(selected).not.toContain("Confirm");
 
+    await fixture.overlay.handleInput("j");
     await fixture.overlay.handleInput(" ");
-    expect(fixture.actions).toContain("practice-target:remove:Use a before consonant sounds.");
-    await fixture.overlay.handleInput("\u001b");
-    expect(plain(fixture.overlay.render(80)).join("\n")).toContain("Pi Fluency · Stats");
+    expect(fixture.actions).toContain("practice-target:select:Second recurring rule");
   });
 
-  it("renders historical and Ignore-paused selections and supports direct picker controls", async () => {
+  it("uses target mutation after consent and keeps historical and Ignore-paused rows toggleable", async () => {
+    const stats = {
+      ...emptyStats,
+      rules: [{
+        patternId: "private-id", rowKey: "recurring", explanation: "Recurring rule",
+        memberPatternKeys: ["private.key"], accepted: 2, ratePerThousand: 20,
+        sparkline: "▁▁▁▁▁▁▁", trend: "stable" as const,
+      }],
+      trendCounts: { improving: 0, worsening: 0, stable: 1, new: 0 },
+    };
     const practice = {
       settings: {
-        ...DEFAULT_PRACTICE_SETTINGS,
-        enabled: true,
-        consentedAt: 1,
-        snoozedUntil: 1_000,
+        ...DEFAULT_PRACTICE_SETTINGS, consentedAt: 1,
         targets: [
           { explanation: "Historical selected rule", memberPatternKeys: ["history.key"] },
           { explanation: "Ignored selected rule", memberPatternKeys: ["ignored.key"] },
@@ -585,136 +579,95 @@ describe("FluencyOverlay actions", () => {
         { explanation: "Historical selected rule", memberPatternKeys: ["history.key"], rowKey: "history", currentPatternKeys: [], coachingEnabled: true },
         { explanation: "Ignored selected rule", memberPatternKeys: ["ignored.key"], rowKey: "ignored", currentPatternKeys: ["ignored.key"], coachingEnabled: false },
       ],
-      sessionSnoozed: true,
+      sessionSnoozed: false,
       now: 100,
     };
-    const fixture = makeOverlay({ initialView: "practice", practice });
+    const fixture = makeOverlay({ initialView: "stats", stats, practice, rows: 60 });
     const text = plain(fixture.overlay.render(80)).join("\n");
-    expect(text).toContain("Selected, not currently recurring");
-    expect(text).toContain("Selected, paused by Ignore");
-    expect(text).toContain("Session and 5-hour snooze active");
+    expect(text.indexOf("Recurring rule")).toBeLessThan(text.indexOf("Selected, not currently recurring"));
+    expect(text).toContain("[x] Historical selected rule");
+    expect(text).toContain("[x] Ignored selected rule · paused by Ignore");
 
-    await fixture.overlay.handleInput("x");
-    await fixture.overlay.handleInput("r");
-    expect(fixture.actions).toContain("practice-enabled:false");
-    expect(fixture.actions).toContain("practice-resume");
-    await fixture.overlay.handleInput("c");
-    expect(plain(fixture.overlay.render(80)).join("\n")).toContain("> Cancel");
-    await fixture.overlay.handleInput("\u001b");
-    expect(fixture.actions).not.toContain("practice-reset");
-    await fixture.overlay.handleInput("c");
-    await fixture.overlay.handleInput("\u001b[C");
-    await fixture.overlay.handleInput("\r");
-    expect(fixture.actions).toContain("practice-reset");
-    expect(plain(fixture.overlay.render(80)).join("\n")).toContain("> Focused · Back to Stats");
+    await fixture.overlay.handleInput("j");
+    await fixture.overlay.handleInput(" ");
+    expect(fixture.actions).toContain("practice-target:remove:Historical selected rule");
+    expect(plain(fixture.overlay.render(80)).join("\n")).toContain("> [x] Ignored selected rule · paused by Ignore");
+    await fixture.overlay.handleInput(" ");
+    expect(fixture.actions).toContain("practice-target:remove:Ignored selected rule");
   });
 
-  it("keeps authoritative state and focus after failed target, master, resume, and reset mutations", async () => {
-    const recurringStats = {
+  it("retains authoritative checkbox and focus on failure and freezes rule input while pending", async () => {
+    const stats = {
       ...emptyStats,
-      rules: [{
-        patternId: "private-id",
-        rowKey: "recurring-row",
-        explanation: "Recurring rule",
-        memberPatternKeys: ["private.key"],
-        accepted: 2,
-        ratePerThousand: 20,
-        sparkline: "▁▁▁▁▁▁▁",
-        trend: "stable" as const,
-      }],
-      trendCounts: { improving: 0, worsening: 0, stable: 1, new: 0 },
+      rules: ["First rule", "Second rule"].map((explanation, index) => ({
+        patternId: `private-${index}`, rowKey: `row-${index}`, explanation,
+        memberPatternKeys: [`private.${index}`], accepted: 1, ratePerThousand: 1,
+        sparkline: "▁▁▁▁▁▁▁", trend: "stable" as const,
+      })),
+      trendCounts: { improving: 0, worsening: 0, stable: 2, new: 0 },
     };
-    const failure = async () => { throw new Error("write failed\u001b"); };
-
-    const target = makeOverlay({
-      initialView: "practice",
-      stats: recurringStats,
-      practice: {
-        settings: { ...DEFAULT_PRACTICE_SETTINGS, consentedAt: 1, targets: [] },
-        targets: [], sessionSnoozed: false, now: 1,
-      },
-      overrides: { setPracticeTarget: failure },
+    const failed = makeOverlay({
+      initialView: "stats", stats, rows: 60,
+      practice: { settings: { ...DEFAULT_PRACTICE_SETTINGS, consentedAt: 1, targets: [] }, targets: [], sessionSnoozed: false, now: 1 },
+      overrides: { setPracticeTarget: async () => { throw new Error("write failed\u001b"); } },
     });
-    await target.overlay.handleInput(" ");
-    let text = plain(target.overlay.render(80)).join("\n");
-    expect(text).toContain("> Focused · [not selected] Recurring rule");
-    expect(text).toContain("Action failed: write failed?");
+    await failed.overlay.handleInput(" ");
+    const failedText = plain(failed.overlay.render(80)).join("\n");
+    expect(failedText).toContain("> [ ] First rule");
+    expect(failedText).toContain("Action failed: write failed?");
 
-    const master = makeOverlay({
-      initialView: "practice", stats: recurringStats,
-      practice: {
-        settings: { ...DEFAULT_PRACTICE_SETTINGS, consentedAt: 1, targets: [] },
-        targets: [], sessionSnoozed: false, now: 1,
-      },
-      overrides: { setPracticeEnabled: failure },
+    let release!: () => void;
+    const pending = new Promise<void>((resolve) => { release = resolve; });
+    const mutation = vi.fn(() => pending);
+    const saving = makeOverlay({
+      initialView: "stats", stats, rows: 60,
+      practice: { settings: { ...DEFAULT_PRACTICE_SETTINGS, consentedAt: 1, targets: [] }, targets: [], sessionSnoozed: false, now: 1 },
+      overrides: { setPracticeTarget: mutation },
     });
-    await master.overlay.handleInput("x");
-    expect(plain(master.overlay.render(80)).join("\n")).toContain("Practice mode: Off");
-
-    const resume = makeOverlay({
-      initialView: "practice", stats: recurringStats,
-      practice: {
-        settings: { ...DEFAULT_PRACTICE_SETTINGS, consentedAt: 1, snoozedUntil: 100, targets: [] },
-        targets: [], sessionSnoozed: true, now: 1,
-      },
-      overrides: { resumePractice: failure },
-    });
-    await resume.overlay.handleInput("r");
-    expect(plain(resume.overlay.render(80)).join("\n")).toContain("Session and 5-hour snooze active");
-
-    const reset = makeOverlay({ initialView: "practice", stats: recurringStats, overrides: { resetPractice: failure } });
-    await reset.overlay.handleInput("c");
-    await reset.overlay.handleInput("\u001b[C");
-    await reset.overlay.handleInput("\r");
-    text = plain(reset.overlay.render(80)).join("\n");
-    expect(text).toContain("Action failed: write failed?");
-    expect(text).toContain("> Focused · [not selected] Recurring rule");
+    const write = saving.overlay.handleInput(" ");
+    await Promise.resolve();
+    await saving.overlay.handleInput("j");
+    await saving.overlay.handleInput(" ");
+    expect(mutation).toHaveBeenCalledOnce();
+    expect(plain(saving.overlay.render(80)).join("\n")).toContain("> [ ] First rule");
+    release();
+    await write;
   });
 
-  it("focuses next historical row, then previous row, after focused removal", async () => {
-    const practice = {
-      settings: {
-        ...DEFAULT_PRACTICE_SETTINGS,
-        consentedAt: 1,
-        targets: [
-          { explanation: "First historical rule", memberPatternKeys: ["first.key"] },
-          { explanation: "Second historical rule", memberPatternKeys: ["second.key"] },
-        ],
-      },
-      targets: [
-        { explanation: "First historical rule", memberPatternKeys: ["first.key"], rowKey: "first", currentPatternKeys: [], coachingEnabled: true },
-        { explanation: "Second historical rule", memberPatternKeys: ["second.key"], rowKey: "second", currentPatternKeys: [], coachingEnabled: true },
-      ],
+  it("preserves focused row keys across order changes and clamps when focused rows disappear", async () => {
+    const rule = (rowKey: string, explanation: string) => ({
+      patternId: `private-${rowKey}`, rowKey, explanation, memberPatternKeys: [`private.${rowKey}`],
+      accepted: 1, ratePerThousand: 1, sparkline: "▁▁▁▁▁▁▁", trend: "stable" as const,
+    });
+    const stats = { ...emptyStats, rules: [rule("first", "First rule"), rule("second", "Second rule")], trendCounts: { improving: 0, worsening: 0, stable: 2, new: 0 } };
+    const practice: PracticeOverlayState = {
+      settings: { ...DEFAULT_PRACTICE_SETTINGS, consentedAt: 1, targets: [] },
+      targets: [],
       sessionSnoozed: false,
       now: 1,
     };
-    const fixture = makeOverlay({ initialView: "practice", practice });
-    await fixture.overlay.handleInput(" ");
-    expect(plain(fixture.overlay.render(80)).join("\n")).toContain("> Focused · [selected] Second historical rule");
-    await fixture.overlay.handleInput(" ");
-    expect(plain(fixture.overlay.render(80)).join("\n")).toContain("> Focused · Back to Stats");
-  });
-
-  it("freezes all Practice picker input while persistence is pending", async () => {
-    let release!: () => void;
-    const pending = new Promise<void>((resolve) => { release = resolve; });
     const fixture = makeOverlay({
-      initialView: "practice",
-      practice: {
-        settings: { ...DEFAULT_PRACTICE_SETTINGS, enabled: true, consentedAt: 1, targets: [] },
-        targets: [],
-        sessionSnoozed: false,
-        now: 1,
+      initialView: "stats", stats, practice, rows: 60,
+      overrides: {
+        setPracticeTarget: (target) => {
+          practice.settings.targets = [target];
+          practice.targets = [{ ...target, rowKey: "selected-second", currentPatternKeys: [...target.memberPatternKeys], coachingEnabled: true }];
+          stats.rules = [stats.rules[1]!, stats.rules[0]!];
+        },
       },
-      overrides: { setPracticeEnabled: () => pending },
     });
-    const saving = fixture.overlay.handleInput("x");
-    await Promise.resolve();
-    expect(plain(fixture.overlay.render(60)).join("\n")).toContain("Saving…");
-    await fixture.overlay.handleInput("\u001b");
-    expect(plain(fixture.overlay.render(60)).join("\n")).toContain("Pi Fluency · Practice");
-    release();
-    await saving;
+    await fixture.overlay.handleInput("j");
+    await fixture.overlay.handleInput(" ");
+    expect(plain(fixture.overlay.render(80)).join("\n")).toContain("> [x] Second rule");
+    stats.rules = [stats.rules[1]!];
+    practice.settings.targets = [];
+    practice.targets = [];
+    expect(plain(fixture.overlay.render(80)).join("\n")).toContain("> [ ] First rule");
+
+    const empty = makeOverlay({ initialView: "stats", stats: emptyStats });
+    await empty.overlay.handleInput(" ");
+    expect(empty.actions).toEqual([]);
+    expect(plain(empty.overlay.render(80)).join("\n")).not.toContain("> [");
   });
 
   it("closes and disposes on abort and preserves the custom overlay options contract", async () => {

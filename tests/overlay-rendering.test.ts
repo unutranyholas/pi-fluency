@@ -65,9 +65,10 @@ describe("FluencyOverlay rendering", () => {
     const text = plain(fixture.overlay.render(80)).join("\n");
 
     expect(text).toContain("Pi Fluency · Stats");
-    expect(text).toContain("Fluency trend · 30 days");
+    expect(text).toContain("Mistakes / 1,000 words · last 30 days");
+    expect(text).toContain(`${"·".repeat(30)}  8.4/k`);
+    expect(text).toContain("30 days ago ... today");
     expect(text).toContain("Accepted rate");
-    expect(text).toContain("8.4 / 1000 English words");
     expect(text).toContain("English words");
     expect(text).toContain("5,014");
     expect(text).toContain("Pending             12");
@@ -77,16 +78,19 @@ describe("FluencyOverlay rendering", () => {
     expect(text).toContain("81%");
     expect(text).toContain("↓ 8 improving");
     expect(text).toContain("↑ 3 worsening");
-    expect(text).toContain("[Selected for practice] Use a before consonant sounds.");
+    expect(text).toContain("> [x] Use a before consonant sounds.");
     expect(text).toContain("2.4/k");
     expect(text).toContain("▇▆▅▄▃▂▁");
-    expect(text).toContain("▆▄▃▂▁▂▂  1.2/k");
     expect(text).not.toContain("hidden-id");
     expect(text).not.toContain("hidden-row-key");
     expect(text).not.toContain("hidden.member.key");
     expect(text).not.toContain("hidden.pattern.key");
     expect(text).not.toContain("R:DET");
     expect(text).not.toContain("a accept");
+    expect(text).not.toContain("p practice targets");
+    expect(text).not.toContain("Pi Fluency · Practice");
+    expect(text).not.toContain("[Selected for practice]");
+    expect(text).not.toContain("Confirm");
   });
 
   it("renders empty Stats and wraps safely at narrow width", () => {
@@ -125,49 +129,43 @@ describe("FluencyOverlay rendering", () => {
     expect(plain(fixture.overlay.render(56))).toEqual(scrolled);
   });
 
-  it("keeps Practice controls textual and width-safe at narrow terminal widths", () => {
-    const fixture = makeOverlay({ initialView: "practice", rows: 60 });
-    for (const width of [24, 40, 56]) {
-      const rendered = fixture.overlay.render(width);
-      expect(rendered.every((line) => visibleWidth(line) === width)).toBe(true);
-      const text = plain(rendered).join("\n");
-      expect(text).toContain("Practice mode");
-      expect(text).toContain("No recurring rules");
-      expect(text.replace(/\s+/g, " ")).toContain("Back to Stats");
-    }
-  });
-
-  it("keeps picker and confirmation actions discoverable at compact 24x15", async () => {
+  it("keeps focused Stats checkbox and footer visible at narrow short sizes", async () => {
     const stats = {
       ...emptyStats,
+      periodRatePerThousand: 8.4,
       rules: [{
-        patternId: "hidden",
-        rowKey: "hidden-row",
-        explanation: "Use articles consistently.",
-        memberPatternKeys: ["hidden.key"],
-        accepted: 2,
-        ratePerThousand: 20,
-        sparkline: "▁▁▁▁▁▁▁",
-        trend: "stable" as const,
+        patternId: "hidden", rowKey: "hidden-row", explanation: "Use articles consistently with explanatory detail.",
+        memberPatternKeys: ["hidden.key"], accepted: 2, ratePerThousand: 20,
+        sparkline: "▁▁▁▁▁▁▁", trend: "stable" as const,
       }],
       trendCounts: { improving: 0, worsening: 0, stable: 1, new: 0 },
     };
-    const fixture = makeOverlay({ initialView: "practice", rows: 15, stats });
-    let rendered = fixture.overlay.render(24);
-    let text = plain(rendered).join("\n");
-    expect(rendered.every((line) => visibleWidth(line) === 24)).toBe(true);
-    expect(text).toContain("Space toggle");
-    expect(text).toContain("x practice on/off");
-    expect(text).toContain("c reset practice");
-    expect(text).toContain("Esc back to Stats");
+    for (const width of [24, 40, 56]) {
+      const fixture = makeOverlay({ initialView: "stats", rows: 15, stats });
+      const rendered = fixture.overlay.render(width);
+      const text = plain(rendered).join("\n");
+      expect(rendered.every((line) => visibleWidth(line) === width)).toBe(true);
+      expect(text).toContain("> [ ]");
+      expect(text.replace(/\s+/g, " ")).toContain("Space toggle");
+      expect(text.replace(/\s+/g, " ")).toContain("esc close");
+    }
+  });
 
-    await fixture.overlay.handleInput(" ");
-    rendered = fixture.overlay.render(24);
-    text = plain(rendered).join("\n");
-    expect(rendered.every((line) => visibleWidth(line) === 24)).toBe(true);
-    expect(text).toContain("> Cancel · Confirm");
-    expect(text).toContain("←→/Tab choose");
-    expect(text).toContain("Enter activate · Esc");
+  it("scrolls enough to keep focused title and rate metadata visible in 15 rows", async () => {
+    const rules = Array.from({ length: 4 }, (_, index) => ({
+      patternId: `hidden-${index}`, rowKey: `row-${index}`,
+      explanation: `Rule ${index} explanation`, memberPatternKeys: [`hidden.${index}`],
+      accepted: 2, ratePerThousand: index + 1, sparkline: "▁▂▃▄▅▆▇", trend: "stable" as const,
+    }));
+    const fixture = makeOverlay({
+      initialView: "stats", rows: 15,
+      stats: { ...emptyStats, rules, trendCounts: { improving: 0, worsening: 0, stable: 4, new: 0 } },
+    });
+    await fixture.overlay.handleInput("j");
+    const text = plain(fixture.overlay.render(56)).join("\n");
+    expect(text).toContain("> [ ] Rule 1 explanation");
+    expect(text).toContain("2.0/k  →  ▁▂▃▄▅▆▇");
+    expect(text).toContain("Space toggle");
   });
 
   it("renders a complete aligned themed border at supported widths", () => {

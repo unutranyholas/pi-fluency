@@ -374,7 +374,7 @@ function registerHandlers(pi: ExtensionAPI, dependencies: ResolvedDependencies):
       return;
     }
     if (action === "practice") {
-      await openInbox(ctx, store, "practice");
+      await openInbox(ctx, store, "stats");
       return;
     }
     if (action === "practice on") {

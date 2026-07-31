@@ -161,22 +161,6 @@ export function makeOverlay(options: {
       practice.targets = practice.targets.filter((item) => item.explanation !== target.explanation);
       if (selected) practice.targets.push({ ...target, rowKey: `selected:${target.explanation}`, currentPatternKeys: [...target.memberPatternKeys], coachingEnabled: true });
     },
-    setPracticeEnabled: (enabled) => {
-      actions.push(`practice-enabled:${enabled}`);
-      practice.settings = { ...practice.settings, revision: practice.settings.revision + 1, enabled };
-    },
-    resumePractice: () => {
-      actions.push("practice-resume");
-      const { snoozedUntil: _snoozedUntil, ...settings } = practice.settings;
-      practice.settings = { ...settings, revision: settings.revision + 1 };
-      practice.sessionSnoozed = false;
-    },
-    resetPractice: () => {
-      actions.push("practice-reset");
-      practice.settings = { ...DEFAULT_PRACTICE_SETTINGS, revision: practice.settings.revision + 1, epoch: practice.settings.epoch + 1, targets: [] };
-      practice.targets = [];
-      practice.sessionSnoozed = false;
-    },
     viewChanged: (view) => { actions.push(`view:${view}`); },
     close: () => { actions.push("close"); },
     ...options.overrides,
