@@ -28,7 +28,9 @@ describe("FluencyOverlay rendering", () => {
       trendCounts: { improving: 8, worsening: 3, stable: 5, new: 2 },
       rules: [{
         patternId: "hidden-id",
+        rowKey: "hidden-row-key",
         explanation: "Use a before consonant sounds.",
+        memberPatternKeys: ["hidden.member.key"],
         accepted: 8,
         ratePerThousand: 2.4,
         sparkline: "▇▆▅▄▃▂▁",
@@ -61,6 +63,8 @@ describe("FluencyOverlay rendering", () => {
     expect(text).toContain("▇▆▅▄▃▂▁");
     expect(text).toContain("▆▄▃▂▁▂▂  1.2/k");
     expect(text).not.toContain("hidden-id");
+    expect(text).not.toContain("hidden-row-key");
+    expect(text).not.toContain("hidden.member.key");
     expect(text).not.toContain("hidden.pattern.key");
     expect(text).not.toContain("R:DET");
     expect(text).not.toContain("a accept");
@@ -81,7 +85,9 @@ describe("FluencyOverlay rendering", () => {
   it("scrolls long Stats vertically without horizontal card navigation resetting it", async () => {
     const rules = Array.from({ length: 20 }, (_, index) => ({
       patternId: `hidden-${index}`,
+      rowKey: `row-${index}`,
       explanation: `Concrete coaching rule ${index} with enough detail to wrap.`,
+      memberPatternKeys: [`rule.member-${index}`],
       accepted: 20 - index,
       ratePerThousand: 2,
       sparkline: "▁▂▃▄▅▆▇",

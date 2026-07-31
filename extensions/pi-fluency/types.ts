@@ -129,6 +129,25 @@ export interface PracticeTarget {
   memberPatternKeys: string[];
 }
 
+export interface ResolvedPracticeTarget extends PracticeTarget {
+  /** Deterministic UI identity derived at runtime; never persisted or rendered. */
+  rowKey: string;
+  currentPatternKeys: string[];
+  coachingEnabled: boolean;
+}
+
+export interface PracticeMistakeCandidate {
+  patternKey: string;
+  explanation: string;
+  errorType: ErrantErrorType;
+}
+
+export interface PracticeAnalysisContext {
+  /** Complete durable descriptors, independent of bounded analyzer pattern context. */
+  targetDescriptors: PracticeTarget[];
+  patterns: MistakePattern[];
+}
+
 export interface PracticeSettings {
   schemaVersion: typeof PRACTICE_SCHEMA_VERSION;
   revision: number;

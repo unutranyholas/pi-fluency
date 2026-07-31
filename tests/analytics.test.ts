@@ -3,8 +3,12 @@ import {
   classifyRuleTrend,
   computeFluencyAnalytics,
   countEnglishWords,
+  practiceRuleRowKey,
   ratePerThousand,
   renderSparkline,
+  resolvePracticeTargets,
+  selectPracticeAnalysisContext,
+  selectedTargetForMistake,
 } from "../extensions/pi-fluency/analytics.js";
 import type {
   EnglishObservation,
@@ -254,6 +258,46 @@ describe("computeFluencyAnalytics", () => {
     expect(result.rules[1]).toMatchObject({ ratePerThousand: 5, changePercent: -50 });
   });
 
+  it("preserves recurring ordering and numeric projections when selection metadata is added", () => {
+    const result = computeFluencyAnalytics({
+      observations: [observation(0, 1_000), observation(-30, 2_000)],
+      occurrences: [
+        ...repeated("alpha-now", 4, "alpha-b", 0, "accepted"),
+        ...repeated("alpha-before", 2, "alpha-a", -30, "accepted"),
+        ...repeated("beta-now", 3, "beta", 0, "accepted"),
+        ...repeated("beta-before", 6, "beta", -30, "accepted"),
+      ],
+      patterns: [
+        pattern("alpha-b", "Alpha rule."),
+        pattern("alpha-a", "Alpha rule."),
+        pattern("beta", "Beta rule."),
+      ],
+      ignoredPatternKeys: new Set(),
+      ignoredCategories: new Set(),
+      now: NOW,
+    });
+
+    expect(result.rules.map(({ memberPatternKeys: _members, rowKey: _row, ...rule }) => rule)).toEqual([
+      {
+        patternId: "alpha-a",
+        explanation: "Alpha rule.",
+        accepted: 4,
+        ratePerThousand: 4,
+        sparkline: "······▄",
+        trend: "worsening",
+        changePercent: 300,
+      },
+      {
+        patternId: "beta",
+        explanation: "Beta rule.",
+        accepted: 3,
+        ratePerThousand: 3,
+        sparkline: "······▄",
+        trend: "stable",
+      },
+    ]);
+  });
+
   it("keeps a retained recurring rule active with one recent acceptance and ages it out after seven days", () => {
     const recurring = computeFluencyAnalytics({
       observations: [observation(0, 100), observation(-40, 100)],
@@ -323,6 +367,132 @@ describe("computeFluencyAnalytics", () => {
     expect(result.activeRules).toBe(0);
     expect(result.oneOffAccepted).toBe(2);
     expect(result.rules).toEqual([]);
+  });
+
+  it("projects all group member keys and stable transient row identity", () => {
+    const first = computeFluencyAnalytics({
+      observations: [observation(0, 100), observation(-1, 100)],
+      occurrences: [
+        occurrence("one", "z-representative", 0, "accepted"),
+        occurrence("two", "member", -1, "accepted"),
+      ],
+      patterns: [
+        pattern("z-representative", "Shared rule."),
+        pattern("member", "Shared rule."),
+      ],
+      ignoredPatternKeys: new Set(),
+      ignoredCategories: new Set(),
+      now: NOW,
+    });
+    const second = computeFluencyAnalytics({
+      observations: [observation(0, 100), observation(-1, 100)],
+      occurrences: [
+        occurrence("one", "a-representative", 0, "accepted"),
+        occurrence("two", "member", -1, "accepted"),
+      ],
+      patterns: [
+        { ...pattern("a-representative", "Shared rule."), patternKey: "rule.z-representative" },
+        pattern("member", "Shared rule."),
+      ],
+      ignoredPatternKeys: new Set(),
+      ignoredCategories: new Set(),
+      now: NOW,
+    });
+
+    expect(first.rules[0]).toMatchObject({
+      memberPatternKeys: ["rule.member", "rule.z-representative"],
+      rowKey: practiceRuleRowKey("Shared rule."),
+    });
+    expect(second.rules[0]!.patternId).toBe("a-representative");
+    expect(second.rules[0]!.rowKey).toBe(first.rules[0]!.rowKey);
+  });
+
+  it("resolves retained targets and applies Ignore only to matching coaching candidates", () => {
+    const targets = [{ explanation: "Retained rule.", memberPatternKeys: ["rule.old"] }];
+    const current = [
+      { ...pattern("new", "Retained rule.", "R:PREP"), patternKey: "rule.new" },
+      pattern("other", "Other rule."),
+    ];
+    const resolved = resolvePracticeTargets({
+      targets,
+      patterns: current,
+      ignoredPatternKeys: new Set(["rule.old"]),
+      ignoredCategories: new Set(["PREP"]),
+    });
+
+    expect(resolved).toEqual([{
+      rowKey: practiceRuleRowKey("Retained rule."),
+      explanation: "Retained rule.",
+      memberPatternKeys: ["rule.new", "rule.old"],
+      currentPatternKeys: ["rule.new"],
+      coachingEnabled: false,
+    }]);
+    expect(selectedTargetForMistake({
+      patternKey: "rule.new",
+      explanation: "Retained rule.",
+      errorType: "R:PREP",
+    }, targets, new Set(), new Set(["PREP"]))).toBeUndefined();
+    expect(selectedTargetForMistake({
+      patternKey: "rule.brand-new",
+      explanation: "Retained rule.",
+      errorType: "R:DET",
+    }, targets, new Set(), new Set())).toEqual(targets[0]);
+    expect(selectedTargetForMistake({
+      patternKey: "rule.other",
+      explanation: "Other rule.",
+      errorType: "R:DET",
+    }, targets, new Set(), new Set())).toBeUndefined();
+  });
+
+  it("keeps stale non-recurring targets coaching-enabled from durable metadata", () => {
+    expect(resolvePracticeTargets({
+      targets: [{ explanation: "Aged-out rule.", memberPatternKeys: ["rule.aged"] }],
+      patterns: [],
+      ignoredPatternKeys: new Set(),
+      ignoredCategories: new Set(),
+    })[0]).toMatchObject({
+      explanation: "Aged-out rule.",
+      memberPatternKeys: ["rule.aged"],
+      currentPatternKeys: [],
+      coachingEnabled: true,
+    });
+  });
+
+  it("reserves complete target descriptors and deterministically bounds current pattern context", () => {
+    const targets = [
+      { explanation: "First target.", memberPatternKeys: ["rule.first-old", "rule.first-new"] },
+      { explanation: "Second target.", memberPatternKeys: ["rule.second"] },
+    ];
+    const patterns = [
+      { ...pattern("ordinary"), lastSeenAt: NOW + 100 },
+      { ...pattern("first-old", "First target."), lastSeenAt: NOW - 10 },
+      { ...pattern("second", "Second target."), lastSeenAt: NOW + 20 },
+      { ...pattern("first-new", "First target."), lastSeenAt: NOW + 10 },
+    ];
+
+    const context = selectPracticeAnalysisContext(targets, patterns, 2);
+    expect(context.targetDescriptors).toEqual(targets);
+    expect(context.patterns.map((item) => item.patternKey)).toEqual([
+      "rule.first-new",
+      "rule.first-old",
+    ]);
+    expect(selectPracticeAnalysisContext(targets, [...patterns].reverse(), 2)).toEqual(context);
+  });
+
+  it("rejects terminal and control payloads at target resolution seams", () => {
+    const unsafe = [{ explanation: "Rule.\u001b[31m", memberPatternKeys: ["rule.safe"] }];
+    expect(() => resolvePracticeTargets({
+      targets: unsafe,
+      patterns: [],
+      ignoredPatternKeys: new Set(),
+      ignoredCategories: new Set(),
+    })).toThrow("Invalid practice target");
+    expect(() => selectedTargetForMistake({
+      patternKey: "rule.safe",
+      explanation: "Rule.\u0007",
+      errorType: "R:DET",
+    }, [{ explanation: "Rule.", memberPatternKeys: ["rule.safe"] }], new Set(), new Set()))
+      .toThrow("Invalid practice candidate");
   });
 
   it("does not mutate input collections", () => {

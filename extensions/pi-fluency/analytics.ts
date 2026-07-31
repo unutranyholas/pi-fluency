@@ -1,8 +1,13 @@
+import { createHash } from "node:crypto";
 import { errantCategory } from "./taxonomy.js";
 import type {
   EnglishObservation,
   MistakeOccurrence,
   MistakePattern,
+  PracticeAnalysisContext,
+  PracticeMistakeCandidate,
+  PracticeTarget,
+  ResolvedPracticeTarget,
 } from "./types.js";
 import type { ErrantCategory } from "./taxonomy.js";
 
@@ -10,6 +15,8 @@ const ENGLISH_WORD = /[\p{L}\p{N}]+(?:['’][\p{L}\p{N}]+)*/gu;
 const SPARK_GLYPHS = "▁▂▃▄▅▆▇█";
 const DATE_KEY = /^\d{4}-\d{2}-\d{2}$/;
 const TREND_DAYS = 30;
+const MAX_KNOWN_PATTERNS = 500;
+const CONTROL_CHARACTER = /[\u0000-\u001f\u007f-\u009f]/;
 
 /** Count word-like runs after the analyzer has classified sanitized prose as English. */
 export function countEnglishWords(prose: string): number {
@@ -20,7 +27,11 @@ export type RuleTrend = "improving" | "worsening" | "stable" | "new";
 
 export interface RuleAnalytics {
   patternId: string;
+  /** Deterministic UI identity derived from explanation; never persist or render it. */
+  rowKey: string;
   explanation: string;
+  /** Complete current group membership for durable selection. Never render it. */
+  memberPatternKeys: string[];
   accepted: number;
   ratePerThousand: number | undefined;
   sparkline: string;
@@ -116,6 +127,120 @@ interface RuleGroup {
   patternId: string;
   explanation: string;
   patternIds: Set<string>;
+  memberPatternKeys: Set<string>;
+}
+
+function assertValidTarget(target: PracticeTarget): void {
+  if (target.explanation.length === 0 || target.explanation.length > 500
+    || CONTROL_CHARACTER.test(target.explanation)
+    || target.memberPatternKeys.length === 0 || target.memberPatternKeys.length > 500
+    || target.memberPatternKeys.some((key) => key.length === 0 || key.length > 500 || CONTROL_CHARACTER.test(key))) {
+    throw new Error("Invalid practice target");
+  }
+}
+
+function copyTarget(target: PracticeTarget): PracticeTarget {
+  assertValidTarget(target);
+  return { explanation: target.explanation, memberPatternKeys: [...target.memberPatternKeys] };
+}
+
+/** Stable transient identity for a concrete rule row. Never persist or display this value. */
+export function practiceRuleRowKey(explanation: string): string {
+  if (explanation.length === 0 || explanation.length > 500 || CONTROL_CHARACTER.test(explanation)) {
+    throw new Error("Invalid practice target");
+  }
+  return `rule-${createHash("sha256").update(explanation).digest("hex").slice(0, 16)}`;
+}
+
+export interface ResolvePracticeTargetsInput {
+  targets: readonly PracticeTarget[];
+  patterns: readonly MistakePattern[];
+  ignoredPatternKeys: ReadonlySet<string>;
+  ignoredCategories: ReadonlySet<ErrantCategory>;
+}
+
+/** Project durable selections against current patterns without mutating either input. */
+export function resolvePracticeTargets(input: ResolvePracticeTargetsInput): ResolvedPracticeTarget[] {
+  return input.targets.map((target) => {
+    assertValidTarget(target);
+    const durableKeys = new Set(target.memberPatternKeys);
+    const current = input.patterns.filter((pattern) =>
+      durableKeys.has(pattern.patternKey) || pattern.explanation === target.explanation);
+    const currentByKey = new Map(current.map((pattern) => [pattern.patternKey, pattern]));
+    const memberPatternKeys = [...new Set([
+      ...target.memberPatternKeys,
+      ...current.map((pattern) => pattern.patternKey),
+    ])].sort((left, right) => left.localeCompare(right));
+    const coachingEnabled = memberPatternKeys.some((patternKey) => {
+      if (input.ignoredPatternKeys.has(patternKey)) return false;
+      const pattern = currentByKey.get(patternKey);
+      return pattern === undefined || !input.ignoredCategories.has(errantCategory(pattern.errorType));
+    });
+    return {
+      rowKey: practiceRuleRowKey(target.explanation),
+      explanation: target.explanation,
+      memberPatternKeys,
+      currentPatternKeys: [...new Set(current.map((pattern) => pattern.patternKey))]
+        .sort((left, right) => left.localeCompare(right)),
+      coachingEnabled,
+    };
+  });
+}
+
+/** Return matching selected target unless candidate is suppressed by Ignore policy. */
+export function selectedTargetForMistake(
+  candidate: PracticeMistakeCandidate,
+  targets: readonly PracticeTarget[],
+  ignoredPatternKeys: ReadonlySet<string>,
+  ignoredCategories: ReadonlySet<ErrantCategory>,
+): PracticeTarget | undefined {
+  for (const target of targets) assertValidTarget(target);
+  if (CONTROL_CHARACTER.test(candidate.explanation) || CONTROL_CHARACTER.test(candidate.patternKey)) {
+    throw new Error("Invalid practice candidate");
+  }
+  if (ignoredPatternKeys.has(candidate.patternKey)
+    || ignoredCategories.has(errantCategory(candidate.errorType))) return undefined;
+  const target = targets.find((item) =>
+    item.explanation === candidate.explanation || item.memberPatternKeys.includes(candidate.patternKey));
+  return target === undefined ? undefined : copyTarget(target);
+}
+
+function comparePatternRecency(left: MistakePattern, right: MistakePattern): number {
+  return right.lastSeenAt - left.lastSeenAt
+    || left.patternKey.localeCompare(right.patternKey)
+    || left.id.localeCompare(right.id);
+}
+
+/** Prioritize selected patterns while keeping complete target descriptors outside bounded context. */
+export function selectPracticeAnalysisContext(
+  targets: readonly PracticeTarget[],
+  patterns: readonly MistakePattern[],
+  maximumPatterns = MAX_KNOWN_PATTERNS,
+): PracticeAnalysisContext {
+  if (!Number.isSafeInteger(maximumPatterns) || maximumPatterns < 0) {
+    throw new Error("Invalid known pattern limit");
+  }
+  const targetDescriptors = targets.map(copyTarget);
+  const selected: MistakePattern[] = [];
+  const selectedIds = new Set<string>();
+  for (const target of targetDescriptors) {
+    const memberKeys = new Set(target.memberPatternKeys);
+    const matches = patterns
+      .filter((pattern) => memberKeys.has(pattern.patternKey) || pattern.explanation === target.explanation)
+      .sort(comparePatternRecency);
+    for (const pattern of matches) {
+      if (selectedIds.has(pattern.id)) continue;
+      selectedIds.add(pattern.id);
+      selected.push(pattern);
+    }
+  }
+  const remaining = patterns
+    .filter((pattern) => !selectedIds.has(pattern.id))
+    .sort(comparePatternRecency);
+  return {
+    targetDescriptors,
+    patterns: [...selected, ...remaining].slice(0, maximumPatterns),
+  };
 }
 
 export function computeFluencyAnalytics(input: AnalyticsInput): FluencyAnalytics {
@@ -168,12 +293,14 @@ export function computeFluencyAnalytics(input: AnalyticsInput): FluencyAnalytics
     const existing = groupsByExplanation.get(explanation);
     if (existing) {
       existing.patternIds.add(pattern.id);
+      existing.memberPatternKeys.add(pattern.patternKey);
       if (pattern.id.localeCompare(existing.patternId) < 0) existing.patternId = pattern.id;
     } else {
       groupsByExplanation.set(explanation, {
         patternId: pattern.id,
         explanation,
         patternIds: new Set([pattern.id]),
+        memberPatternKeys: new Set([pattern.patternKey]),
       });
     }
   }
@@ -217,7 +344,9 @@ export function computeFluencyAnalytics(input: AnalyticsInput): FluencyAnalytics
       : undefined;
     return [{
       patternId: group.patternId,
+      rowKey: practiceRuleRowKey(group.explanation),
       explanation: group.explanation,
+      memberPatternKeys: [...group.memberPatternKeys].sort((left, right) => left.localeCompare(right)),
       accepted,
       ratePerThousand: currentRate,
       sparkline: renderSparkline(sparklineValues),
