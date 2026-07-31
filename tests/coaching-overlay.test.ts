@@ -51,6 +51,21 @@ describe("CoachingOverlay", () => {
     expect(finish).toHaveBeenCalledWith("send-unchecked");
   });
 
+  it("uses raw Escape and configured cancel to edit while checking", () => {
+    const finish = vi.fn();
+    const overlay = new CoachingOverlay({
+      tui: { requestRender: vi.fn(), terminal: { rows: 30 } },
+      keybindings,
+      finish,
+    });
+
+    overlay.handleInput(Key.escape);
+    expect(finish).toHaveBeenCalledWith("edit");
+    finish.mockClear();
+    overlay.handleInput("esc");
+    expect(finish).toHaveBeenCalledWith("edit");
+  });
+
   it("initially focuses Send once, confirms with Enter, and preserves Edit and snooze navigation", () => {
     const finish = vi.fn();
     const overlay = new CoachingOverlay({

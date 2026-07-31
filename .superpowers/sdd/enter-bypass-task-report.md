@@ -65,3 +65,29 @@ Implementation commit: `1d2edc0` (`feat: use Enter for practice bypass`).
 ## Concerns
 
 None found. Abort-ignoring analyzer test deliberately settles provider promise after asserting timeout so process-local coordinator quarantine cannot leak into later tests.
+
+## Review-gap follow-up
+
+Added component public-seam coverage for checking-state cancellation. Raw `Key.escape` and configured `tui.select.cancel` input each finish with `edit`; existing assertions still cover raw Enter, configured confirm, and inert `s`.
+
+Commands:
+
+```bash
+npx vitest run tests/coaching-overlay.test.ts tests/extension.test.ts
+```
+
+Result: **passed** — 2 files, 94 tests.
+
+```bash
+npm run typecheck
+```
+
+Result: **passed** — TypeScript emitted no errors.
+
+```bash
+git diff --check
+```
+
+Result: **passed** — no whitespace errors.
+
+Changed files: `tests/coaching-overlay.test.ts`, `.superpowers/sdd/enter-bypass-task-report.md`. No production files changed.
