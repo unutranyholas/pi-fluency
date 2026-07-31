@@ -104,6 +104,22 @@ describe("CoachingOverlay", () => {
     expect(finish).toHaveBeenCalledWith("edit");
   });
 
+  it("gives configured confirm precedence over matched-state shortcuts", () => {
+    const finish = vi.fn();
+    const overlay = new CoachingOverlay({
+      tui: { requestRender: vi.fn(), terminal: { rows: 30 } },
+      keybindings: {
+        matches: (data, binding) => binding === "tui.select.confirm" && data === "t",
+      },
+      finish,
+    });
+    overlay.setMatches([mistake("first", "one")], [{ explanation: "Rule", memberPatternKeys: ["first"] }]);
+
+    overlay.handleInput("t");
+
+    expect(finish).toHaveBeenCalledWith("send-once");
+  });
+
   it("renders bounded, ordered explicit details and keyboard actions", () => {
     const finish = vi.fn();
     const overlay = new CoachingOverlay({

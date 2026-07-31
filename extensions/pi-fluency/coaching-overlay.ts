@@ -85,7 +85,17 @@ export class CoachingOverlay implements Component {
       }
       return;
     }
-    if (cancel || data.toLowerCase() === "e") {
+    if (cancel) {
+      this.options.finish("edit");
+      return;
+    }
+    if (data === Key.enter || this.matches(data, "tui.select.confirm")) {
+      const action = (["edit", "send-once", "snooze-session", "snooze-five-hours"] as const)[this.selectedAction]!;
+      if (action === "snooze-session" || action === "snooze-five-hours") this.beginSnooze(action);
+      else this.options.finish(action);
+      return;
+    }
+    if (data.toLowerCase() === "e") {
       this.options.finish("edit");
       return;
     }
@@ -103,10 +113,6 @@ export class CoachingOverlay implements Component {
     } else if (this.matches(data, "tui.select.pageUp")) {
       this.detailOffset = Math.max(0, this.detailOffset - this.visibleDetailCount);
       this.options.tui.requestRender();
-    } else if (data === Key.enter || this.matches(data, "tui.select.confirm")) {
-      const action = (["edit", "send-once", "snooze-session", "snooze-five-hours"] as const)[this.selectedAction]!;
-      if (action === "snooze-session" || action === "snooze-five-hours") this.beginSnooze(action);
-      else this.options.finish(action);
     }
   }
 
