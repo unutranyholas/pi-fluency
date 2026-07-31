@@ -75,6 +75,7 @@ export interface ExtensionDependencies {
   rootDir?: string;
   analyzerFactory?: (ctx: ExtensionContext, store: FluencyStore, settings?: FluencySettings) => Analyzer;
   now?: () => number;
+  openStore?: (rootDir: string) => Promise<FluencyStore>;
   openInbox?: OpenInbox;
   showCoaching?: ShowCoaching;
 }
@@ -217,11 +218,34 @@ function registerHandlers(pi: ExtensionAPI, dependencies: ResolvedDependencies):
   };
 
   const getStore = async (): Promise<FluencyStore> => {
-    storePromise ??= FluencyStore.open(dependencies.rootDir).then((store) => {
-      storeRef = store;
-      return store;
-    });
+    storePromise ??= (dependencies.openStore?.(dependencies.rootDir) ?? FluencyStore.open(dependencies.rootDir))
+      .then((store) => {
+        if (!shuttingDown) storeRef = store;
+        return store;
+      });
     return storePromise;
+  };
+
+  const getStoreBefore = async (deadline: number): Promise<FluencyStore> => {
+    const acquisition = getStore().then(
+      (store) => ({ kind: "store" as const, store }),
+      () => ({ kind: "error" as const }),
+    );
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) throw new Error("Store acquisition deadline exceeded");
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      const result = await Promise.race([
+        acquisition,
+        new Promise<{ kind: "deadline" }>((resolve) => {
+          timer = setTimeout(() => resolve({ kind: "deadline" }), remaining);
+        }),
+      ]);
+      if (result.kind === "store") return result.store;
+      throw new Error(result.kind === "error" ? "Store acquisition failed" : "Store acquisition deadline exceeded");
+    } finally {
+      if (timer !== undefined) clearTimeout(timer);
+    }
   };
 
   const analyzerErrorReason = (error: unknown): StatusErrorReason => {
@@ -535,7 +559,7 @@ function registerHandlers(pi: ExtensionAPI, dependencies: ResolvedDependencies):
       } catch {
         // Original event still owns submission. Only ordinary background collection may follow.
         try {
-          const fallbackStore = await getStore();
+          const fallbackStore = await getStoreBefore(foregroundDeadline);
           const fresh = await fallbackStore.getFreshPolicySnapshot(foregroundDeadline);
           if (!shuttingDown && hasValidConfiguration(fresh.settings, ctx)) {
             getWorker(ctx, fallbackStore).enqueue(prompt, fenceFromPolicy(fresh));
@@ -547,7 +571,7 @@ function registerHandlers(pi: ExtensionAPI, dependencies: ResolvedDependencies):
 
     let store: FluencyStore;
     try {
-      store = await getStore();
+      store = await getStoreBefore(foregroundDeadline);
     } catch {
       if (!idleTextOnly) return;
       try {
@@ -727,6 +751,7 @@ function registerHandlers(pi: ExtensionAPI, dependencies: ResolvedDependencies):
         );
         analyzerChangeObserved = revalidation === "analyzer-changed";
         if (revalidation === "analytics-disabled" || revalidation === "analyzer-changed") {
+          technicalFailureMessage = "Sent without practice check — practice settings changed.";
           if (revalidation === "analytics-disabled") backgroundAllowed = false;
           return { kind: "failure" };
         }
@@ -813,9 +838,14 @@ function registerHandlers(pi: ExtensionAPI, dependencies: ResolvedDependencies):
       return { action: "handled" };
     }
     if (decision === "send-unchecked" || decision === "technical-failure") {
+      const shutdownInterrupted = shuttingDown;
       attemptController.abort();
       await checkPromise;
       coachingControllers.delete(attemptController);
+      if (shutdownInterrupted || shuttingDown) {
+        backgroundAllowed = false;
+        return failOpen(practiceFailureMessage("shutdown"));
+      }
       return failOpen(decision === "send-unchecked"
         ? "Sent without practice check — analyzer cancelled."
         : technicalFailureMessage);
