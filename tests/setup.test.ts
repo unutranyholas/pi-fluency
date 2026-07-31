@@ -19,6 +19,10 @@ describe("runSetup", () => {
     expect(select).toHaveBeenCalledWith("Pi Fluency analyzer model", ["evil-provider/model-id"]);
     const disclosure = confirm.mock.calls[0]?.[1];
     expect(disclosure).toContain("evil-provider/model-id");
+    expect(disclosure).toContain("background analytics after Pi Fluency allows a prompt");
+    expect(disclosure).toContain("Optional preflight practice is off");
+    expect(disclosure).toContain("requires a separate disclosure before first activation");
+    expect(disclosure).not.toContain("before main submission");
     expect(disclosure).not.toMatch(/[\u0000-\u001f\u007f-\u009f]/u);
     expect(updateSettings).toHaveBeenCalledWith(expect.objectContaining({
       provider: model.provider,

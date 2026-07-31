@@ -6,6 +6,7 @@ Pi Fluency analyzes human-authored prompts, lets you review possible English mis
 
 - Reviews only interactive prompts you write
 - Groups repeated findings into concrete recurring patterns
+- Offers optional submit-time practice for recurring rules you select
 - Tracks accepted mistakes per 1,000 English words
 - Keeps one-off mistakes out of recurring-pattern counts
 - Works across Pi projects and sessions
@@ -42,7 +43,7 @@ Requires Pi 0.80.10 or newer.
 pi install npm:pi-fluency
 ```
 
-Run `/reload`, then `/fluency`. Choose an available analysis model and confirm provider disclosure. Analysis remains off until setup completes.
+Run `/reload`, then `/fluency`. Choose an available analysis model and confirm provider disclosure for background analytics. Analysis remains off until setup completes. Optional preflight practice stays off and has a separate disclosure when you first activate a target.
 
 Useful commands:
 
@@ -50,13 +51,33 @@ Useful commands:
 | --- | --- |
 | `/fluency` | Set up Pi Fluency or open Inbox |
 | `/fluency stats` | Open 30-day analytics |
+| `/fluency practice` | Choose recurring rules and inspect practice state |
+| `/fluency practice on` / `off` | Enable or bypass selected-rule practice |
+| `/fluency practice resume` | End current session and five-hour snoozes |
+| `/fluency practice reset` | Confirm, then clear practice selections and consent |
 | `/fluency pause` | Pause analysis and hide toolbar status |
 | `/fluency resume` | Resume analysis |
 | `/fluency model` | Change analysis model |
-| `/fluency status` | Show model, queue, and storage status |
-| `/fluency clear` | Confirm, then clear coaching and analytics history |
+| `/fluency status` | Show model, queue, storage, and practice status |
+| `/fluency clear` | Confirm, then clear coaching and analytics history; preserve practice selections |
 
 `Ctrl+Shift+L` opens Inbox after setup.
+
+## Practice selected rules
+
+Practice is an optional analytical aid, not comprehensive grammar checking, automatic correction, or English instruction. From Stats, press `p` to open **Practice targets**, then select concrete recurring rules. First activation asks for separate preflight consent: eligible sanitized prompt prose may reach configured Fluency model before main request proceeds, including a draft you later keep instead of sending.
+
+For idle, text-only interactive prompts, Pi Fluency checks selected rules at submit time. This sends full sanitized prose from eligible prompt to analysis provider and can add provider latency, bounded to one attempt within about six seconds. Editor keeps exact text Pi Fluency received while check runs. Clean result proceeds normally. Match opens checkpoint without rewriting text:
+
+- **Edit** or **Esc** blocks submission and leaves received text in editor.
+- **Send once** proceeds once and keeps practice active for later prompts.
+- **Snooze session** proceeds once and bypasses checks for current conversation session, including reload or resume of same session file.
+- **Snooze 5 hours** proceeds once and bypasses checks across Pi sessions until deadline.
+- While checking, **Send unchecked** cancels bounded check and proceeds; **Esc** returns to Edit.
+
+Use `/fluency practice resume` to end either snooze. Technical errors, busy or timed-out analysis fail open and attempt to send unchecked. If editor cannot be cleared safely, Pi Fluency does not send and leaves draft visible. Adapter that ignores cancellation is quarantined process-locally: later prompts send unchecked without growing analysis queue until call settles or Pi process restarts.
+
+Successful preflight result is reused for normal analytics. Edit/Esc attempt adds no Pi Fluency history; later edited submission is checked again. Practice selections are separate from history, so `/fluency clear` preserves them. Ignoring selected rule pauses matching practice until rule is restored.
 
 ## What it measures
 
@@ -89,7 +110,9 @@ Local analytics live under `~/.pi/agent/pi-fluency/`. History contains hashes, d
 
 Model findings can be incomplete or wrong. Accept only findings you agree with. Pi Fluency measures reviewed writing patterns; it does not assess fluency, guarantee improvement, or replace human instruction.
 
-Input-handler order limits draft provenance. Extensions running before Pi Fluency can alter text Pi Fluency receives and can therefore alter text restored for Edit. Extensions running after Pi Fluency can alter or intercept text Pi Fluency allowed, so analyzed text is not guaranteed to equal final sent text.
+Preflight does not run for image-bearing submissions, slash commands, code-only input, RPC or extension-injected input, or active-stream `steer` / `followUp` input. Those boundaries avoid attachment loss and agent-control delays; eligible prompts may still use background analytics. Practice checks only selected concrete rules, so no checkpoint means neither proof that text is correct nor comprehensive analysis.
+
+Input-handler order limits draft provenance. Extensions running before Pi Fluency can alter text Pi Fluency receives and can therefore alter text restored for Edit. Extensions running after Pi Fluency can alter or intercept text Pi Fluency allowed, so analyzed text is not guaranteed to equal final sent text. Place text-transforming or intercepting extensions compatibly; Pi Fluency cannot enforce original editor bytes or final send order.
 
 ## Project
 

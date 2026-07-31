@@ -16,7 +16,7 @@ export async function runSetup(
   if (!model) return false;
   const approved = await ctx.ui.confirm(
     "Enable Pi Fluency?",
-    `User-authored prose will be sent to ${sanitizeTerminalLabel(model.provider, 100) || "unknown-provider"}/${sanitizeTerminalLabel(model.id, 100) || "unknown-model"}. Code, commands, assistant text, and tool output are excluded. Raw prompt bodies are not stored; bounded sanitized excerpts may equal a short prompt.`,
+    `User-authored prose will be sent to ${sanitizeTerminalLabel(model.provider, 100) || "unknown-provider"}/${sanitizeTerminalLabel(model.id, 100) || "unknown-model"} for background analytics after Pi Fluency allows a prompt. Code, commands, assistant text, and tool output are excluded. Raw prompt bodies are not stored; bounded sanitized excerpts may equal a short prompt. Optional preflight practice is off and requires a separate disclosure before first activation.`,
   );
   if (!approved) return false;
   await store.updateSettings({
