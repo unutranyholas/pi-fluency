@@ -250,6 +250,66 @@ describe("FluencyWorker", () => {
     expect(getAnalyzerConfiguration).toHaveBeenCalledTimes(3);
   });
 
+  it("discards an abort-ignoring background result invalidated by a foreground deadline", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(1_000);
+    try {
+      const coordinator = new AnalyzerCoordinator();
+      const background = createDeferred<AnalysisResult>();
+      const onResult = vi.fn().mockResolvedValue(undefined);
+      const worker = makeWorker({
+        coordinator,
+        analyzer: { analyze: vi.fn(() => background.promise) },
+        onResult,
+      });
+      worker.enqueue(prompt("background"));
+      const draining = worker.drain();
+
+      const foreground = worker.analyzeForeground({
+        analyzer: { analyze: vi.fn().mockResolvedValue(emptyResult) },
+        prompt: prompt("foreground"),
+        patterns: [],
+        deadline: Date.now() + 50,
+      });
+      await vi.advanceTimersByTimeAsync(150);
+      await expect(foreground).resolves.toEqual({ kind: "busy" });
+      expect(coordinator.isQuarantined()).toBe(true);
+
+      background.resolve(emptyResult);
+      await draining;
+      expect(onResult).not.toHaveBeenCalled();
+      expect(coordinator.isQuarantined()).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("removes foreground deadline timers and cancellation listeners after success", async () => {
+    vi.useFakeTimers();
+    try {
+      const coordinator = new AnalyzerCoordinator();
+      const owner = coordinator.attachOwner();
+      const cancellation = new AbortController();
+      const addListener = vi.spyOn(cancellation.signal, "addEventListener");
+      const removeListener = vi.spyOn(cancellation.signal, "removeEventListener");
+
+      await expect(coordinator.analyzeForeground({
+        owner,
+        analyzer: { analyze: vi.fn().mockResolvedValue(emptyResult) },
+        prompt: prompt("clean"),
+        patterns: [],
+        deadline: Date.now() + 6_000,
+        signal: cancellation.signal,
+      })).resolves.toEqual({ kind: "success", result: emptyResult });
+
+      expect(addListener).toHaveBeenCalledWith("abort", expect.any(Function), { once: true });
+      expect(removeListener).toHaveBeenCalledWith("abort", expect.any(Function));
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("bounds abort-ignoring foreground calls, quarantines overlap, and clears on settlement", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(1_000);

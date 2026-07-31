@@ -30,6 +30,7 @@ interface ActiveAnalysis<T = unknown> {
   controller: AbortController;
   settlement: Promise<SettledAnalysis<T>>;
   settled: boolean;
+  invalidated: boolean;
 }
 
 export type ForegroundAnalysisOutcome =
@@ -55,10 +56,6 @@ export class AnalyzerCoordinatorUnavailableError extends Error {
 
 function normalizeError(error: unknown): Error {
   return error instanceof Error ? error : new Error(String(error));
-}
-
-function delay(delayMs: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, Math.max(0, delayMs)));
 }
 
 /** Process-local serializer. State contains no extension callbacks, stores, or UI contexts. */
@@ -116,6 +113,7 @@ export class AnalyzerCoordinator {
       ownerToken: owner.token,
       controller,
       settled: false,
+      invalidated: false,
       settlement: undefined as unknown as Promise<SettledAnalysis<T>>,
     };
     let taskPromise: Promise<T>;
@@ -159,16 +157,25 @@ export class AnalyzerCoordinator {
       const active = this.start(owner, task);
       const settled = await Promise.race([active.settlement, this.ownerRevoked(owner)]);
       if (settled === "revoked") throw new DOMException("Aborted", "AbortError");
-      if (!this.isCurrentOwner(owner)) throw new DOMException("Aborted", "AbortError");
+      if (!this.isCurrentOwner(owner) || active.invalidated) throw new DOMException("Aborted", "AbortError");
       if (settled.ok) return settled.value as T;
       throw settled.error ?? new Error("Analysis failed");
     }
   }
 
   private async abortWithGrace(active: ActiveAnalysis, graceMs: number): Promise<boolean> {
+    active.invalidated = true;
     active.controller.abort(new DOMException("Aborted", "AbortError"));
     if (active.settled) return true;
-    await Promise.race([active.settlement.then(() => undefined), delay(graceMs)]);
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await Promise.race([
+        active.settlement.then(() => undefined),
+        new Promise<void>((resolve) => { timer = setTimeout(resolve, Math.max(0, graceMs)); }),
+      ]);
+    } finally {
+      if (timer !== undefined) clearTimeout(timer);
+    }
     if (!active.settled) {
       this.quarantined = true;
       this.changed();
@@ -197,12 +204,19 @@ export class AnalyzerCoordinator {
           if (active) await this.abortWithGrace(active, graceMs);
           return { kind: "busy" };
         }
-        await Promise.race([
-          this.waitForChange(remaining),
-          options.signal === undefined
+        let onAbort: (() => void) | undefined;
+        try {
+          const cancellation = options.signal === undefined
             ? new Promise<never>(() => undefined)
-            : new Promise<void>((resolve) => options.signal!.addEventListener("abort", () => resolve(), { once: true })),
-        ]);
+            : new Promise<void>((resolve) => {
+              onAbort = resolve;
+              options.signal!.addEventListener("abort", onAbort, { once: true });
+              if (options.signal!.aborted) resolve();
+            });
+          await Promise.race([this.waitForChange(remaining), cancellation]);
+        } finally {
+          if (onAbort !== undefined) options.signal!.removeEventListener("abort", onAbort);
+        }
       }
       if (!this.isCurrentOwner(options.owner)) return { kind: "shutdown" };
       if (this.quarantined) return { kind: "quarantined" };
@@ -216,11 +230,30 @@ export class AnalyzerCoordinator {
         options.selectedTargets,
       ));
       const remaining = Math.max(0, options.deadline - Date.now());
-      const deadlineRace = delay(remaining).then(() => "deadline" as const);
-      const cancelRace = options.signal === undefined
-        ? new Promise<never>(() => undefined)
-        : new Promise<"cancel">((resolve) => options.signal!.addEventListener("abort", () => resolve("cancel"), { once: true }));
-      const outcome = await Promise.race([active.settlement, deadlineRace, cancelRace, this.ownerRevoked(options.owner)]);
+      let deadlineTimer: ReturnType<typeof setTimeout> | undefined;
+      let onAbort: (() => void) | undefined;
+      let outcome: SettledAnalysis<AnalysisResult> | "deadline" | "cancel" | "revoked";
+      try {
+        const deadlineRace = new Promise<"deadline">((resolve) => {
+          deadlineTimer = setTimeout(() => resolve("deadline"), remaining);
+        });
+        const cancelRace = options.signal === undefined
+          ? new Promise<never>(() => undefined)
+          : new Promise<"cancel">((resolve) => {
+            onAbort = () => resolve("cancel");
+            options.signal!.addEventListener("abort", onAbort, { once: true });
+            if (options.signal!.aborted) onAbort();
+          });
+        outcome = await Promise.race([
+          active.settlement,
+          deadlineRace,
+          cancelRace,
+          this.ownerRevoked(options.owner),
+        ]);
+      } finally {
+        if (deadlineTimer !== undefined) clearTimeout(deadlineTimer);
+        if (onAbort !== undefined) options.signal!.removeEventListener("abort", onAbort);
+      }
       if (outcome === "deadline" || outcome === "cancel" || outcome === "revoked") {
         await this.abortWithGrace(active, graceMs);
         if (outcome === "cancel") return { kind: "cancelled" };
