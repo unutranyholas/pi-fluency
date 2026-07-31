@@ -11,6 +11,7 @@ import { AnalyzerConfigurationError, ModelAnalyzer, type Analyzer } from "./anal
 import { computeFluencyAnalytics } from "./analytics.js";
 import { collectPrompt } from "./collector.js";
 import { showFluencyOverlay, type FluencyView } from "./overlay.js";
+import { PracticeSessionSnooze } from "./practice-settings.js";
 import { sanitizeTerminalLabel } from "./sanitize.js";
 import { runSetup } from "./setup.js";
 import { formatStatus, type StatusErrorReason, type StatusState } from "./status.js";
@@ -19,7 +20,8 @@ import type { FluencySettings } from "./types.js";
 import { FluencyWorker } from "./worker.js";
 
 const STATUS_KEY = "pi-fluency";
-const USAGE = "Usage: /fluency [pause|resume|status|model|clear|stats]";
+const USAGE = "Usage: /fluency [pause|resume|status|model|clear|stats|practice [on|off|resume|reset]]";
+const PRACTICE_DISCLOSURE = "Before main submission, full sanitized draft goes to configured Fluency model and may be analyzed even if you later choose not to send it.";
 
 export interface OpenInboxOptions {
   signal: AbortSignal;
@@ -75,6 +77,23 @@ function registerHandlers(pi: ExtensionAPI, dependencies: ResolvedDependencies):
   const notifiedErrors = new Set<string>();
   const inputSessionId = randomUUID();
   let inputSequence = 0;
+  const practiceSessionSnooze = new PracticeSessionSnooze();
+
+  const sessionFile = (ctx: ExtensionContext): string | undefined =>
+    ctx.sessionManager?.getSessionFile?.();
+  const sessionEntries = (ctx: ExtensionContext) => ctx.sessionManager?.getEntries?.() ?? [];
+  const isSessionPracticeSnoozed = (ctx: ExtensionContext, store: FluencyStore): boolean => {
+    const practice = store.getPracticeSettings();
+    return practiceSessionSnooze.restore(sessionEntries(ctx), sessionFile(ctx), practice.epoch);
+  };
+  const resumeSessionPractice = (ctx: ExtensionContext, store: FluencyStore): void => {
+    const practice = store.getPracticeSettings();
+    practiceSessionSnooze.resume(
+      sessionFile(ctx),
+      practice.epoch,
+      (customType, data) => pi.appendEntry(customType, data),
+    );
+  };
 
   const publishStatus = (ctx: ExtensionContext, state: StatusState): void => {
     const text = formatStatus(state);
@@ -242,6 +261,10 @@ function registerHandlers(pi: ExtensionAPI, dependencies: ResolvedDependencies):
           onMutationError,
           initialView,
           dependencies.now,
+          {
+            sessionSnoozed: () => isSessionPracticeSnoozed(ctx, store),
+            resumeSession: () => resumeSessionPractice(ctx, store),
+          },
         ),
     );
     overlayOpen = current;
@@ -288,6 +311,42 @@ function registerHandlers(pi: ExtensionAPI, dependencies: ResolvedDependencies):
       await openInbox(ctx, store, "stats");
       return;
     }
+    if (action === "practice") {
+      await openInbox(ctx, store, "practice");
+      return;
+    }
+    if (action === "practice on") {
+      const practice = store.getPracticeSettings();
+      if (practice.consentedAt === undefined) {
+        const confirmed = await ctx.ui.confirm("Enable Pi Fluency practice?", PRACTICE_DISCLOSURE);
+        if (!confirmed) {
+          ctx.ui.notify("Pi Fluency practice unchanged", "info");
+          return;
+        }
+        await store.recordPracticeConsent(dependencies.now());
+      }
+      await store.setPracticeEnabled(true);
+      ctx.ui.notify("Pi Fluency practice enabled", "info");
+      return;
+    }
+    if (action === "practice off") {
+      await store.setPracticeEnabled(false);
+      ctx.ui.notify("Pi Fluency practice disabled", "info");
+      return;
+    }
+    if (action === "practice resume") {
+      await store.resumePractice();
+      resumeSessionPractice(ctx, store);
+      ctx.ui.notify("Pi Fluency practice resumed now", "info");
+      return;
+    }
+    if (action === "practice reset") {
+      if (await ctx.ui.confirm("Reset Pi Fluency practice?", "This clears practice targets, consent, mode, and snoozes. Fluency history stays unchanged.")) {
+        await store.resetPractice();
+        ctx.ui.notify("Pi Fluency practice reset", "info");
+      }
+      return;
+    }
     if (action === "pause") {
       await store.updateSettings({ enabled: false });
       await workerRef?.shutdown();
@@ -320,9 +379,15 @@ function registerHandlers(pi: ExtensionAPI, dependencies: ResolvedDependencies):
       const state = active
         ? "enabled"
         : settings.enabled ? "inactive (configuration invalid)" : "paused";
+      const practice = store.getPracticeSettings();
+      const globalSnoozed = (practice.snoozedUntil ?? 0) > dependencies.now();
+      const sessionSnoozed = isSessionPracticeSnoozed(ctx, store);
+      const practiceSnooze = globalSnoozed && sessionSnoozed
+        ? "session+5-hour"
+        : sessionSnoozed ? "session" : globalSnoozed ? "5-hour" : "none";
       if (!active) clearStatus(ctx);
       ctx.ui.notify(
-        `Pi Fluency: ${state}; model=${model}; queued=${snapshot.queued}; dropped=${snapshot.dropped}; warnings=${store.getWarnings().length}`,
+        `Pi Fluency: ${state}; model=${model}; queued=${snapshot.queued}; dropped=${snapshot.dropped}; warnings=${store.getWarnings().length}; practice=${practice.enabled ? "on" : "off"}; practice-selected=${practice.targets.length}; practice-snooze=${practiceSnooze}`,
         "info",
       );
       return;

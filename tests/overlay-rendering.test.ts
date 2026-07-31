@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import { renderCompactDiff } from "../extensions/pi-fluency/diff.js";
 import { wrapCompactDiff } from "../extensions/pi-fluency/overlay.js";
 import type { FluencyAnalytics } from "../extensions/pi-fluency/analytics.js";
+import { DEFAULT_PRACTICE_SETTINGS } from "../extensions/pi-fluency/types.js";
 import {
   emptyStats,
   framedPlain,
@@ -42,6 +43,23 @@ describe("FluencyOverlay rendering", () => {
       stats,
       initialView: "stats",
       patterns: [pattern("private", { patternKey: "hidden.pattern.key", errorType: "R:DET" })],
+      practice: {
+        settings: {
+          ...DEFAULT_PRACTICE_SETTINGS,
+          enabled: true,
+          consentedAt: 1,
+          targets: [{ explanation: "Use a before consonant sounds.", memberPatternKeys: ["hidden.member.key"] }],
+        },
+        targets: [{
+          explanation: "Use a before consonant sounds.",
+          memberPatternKeys: ["hidden.member.key"],
+          rowKey: "hidden-row-key",
+          currentPatternKeys: ["hidden.member.key"],
+          coachingEnabled: true,
+        }],
+        sessionSnoozed: false,
+        now: 1,
+      },
     });
     const text = plain(fixture.overlay.render(80)).join("\n");
 
@@ -58,7 +76,7 @@ describe("FluencyOverlay rendering", () => {
     expect(text).toContain("81%");
     expect(text).toContain("↓ 8 improving");
     expect(text).toContain("↑ 3 worsening");
-    expect(text).toContain("Use a before consonant sounds.");
+    expect(text).toContain("[Selected for practice] Use a before consonant sounds.");
     expect(text).toContain("2.4/k");
     expect(text).toContain("▇▆▅▄▃▂▁");
     expect(text).toContain("▆▄▃▂▁▂▂  1.2/k");
@@ -104,6 +122,18 @@ describe("FluencyOverlay rendering", () => {
     expect(scrolled).not.toEqual(initial);
     await fixture.overlay.handleInput("\u001b[C");
     expect(plain(fixture.overlay.render(56))).toEqual(scrolled);
+  });
+
+  it("keeps Practice controls textual and width-safe at narrow terminal widths", () => {
+    const fixture = makeOverlay({ initialView: "practice", rows: 60 });
+    for (const width of [24, 40, 56]) {
+      const rendered = fixture.overlay.render(width);
+      expect(rendered.every((line) => visibleWidth(line) === width)).toBe(true);
+      const text = plain(rendered).join("\n");
+      expect(text).toContain("Practice mode");
+      expect(text).toContain("No recurring rules");
+      expect(text.replace(/\s+/g, " ")).toContain("Back to Stats");
+    }
   });
 
   it("renders a complete aligned themed border at supported widths", () => {

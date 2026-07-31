@@ -6,7 +6,7 @@ import {
   showFluencyOverlay,
 } from "../extensions/pi-fluency/overlay.js";
 import type { FluencyStore } from "../extensions/pi-fluency/store.js";
-import type { ReviewPattern } from "../extensions/pi-fluency/types.js";
+import { DEFAULT_PRACTICE_SETTINGS, type ReviewPattern } from "../extensions/pi-fluency/types.js";
 import {
   makeOverlay,
   pattern,
@@ -516,6 +516,117 @@ describe("FluencyOverlay actions", () => {
 
     await expect(fixture.overlay.handleInput("l")).resolves.toBeUndefined();
     expect(plain(fixture.overlay.render(60)).join("\n")).toContain("Action failed: write failed");
+  });
+
+  it("opens keyboard Practice targets from Stats and requires safely focused consent", async () => {
+    const fixture = makeOverlay({
+      initialView: "stats",
+      stats: {
+        pendingOccurrences: 0,
+        periodPendingOccurrences: 0,
+        activeRules: 1,
+        toolbarSparkline: "·······",
+        englishWords: 100,
+        accepted: 2,
+        dismissed: 0,
+        oneOffAccepted: 0,
+        rules: [{
+          patternId: "private-id",
+          rowKey: "private-row",
+          explanation: "Use a before consonant sounds.",
+          memberPatternKeys: ["private.pattern.key"],
+          accepted: 2,
+          ratePerThousand: 20,
+          sparkline: "▁▁▁▁▁▁▁",
+          trend: "stable",
+        }],
+        trendCounts: { improving: 0, worsening: 0, stable: 1, new: 0 },
+      },
+    });
+
+    await fixture.overlay.handleInput("p");
+    expect(plain(fixture.overlay.render(80)).join("\n")).toContain("Recurring choices");
+    await fixture.overlay.handleInput(" ");
+    const disclosure = plain(fixture.overlay.render(80)).join("\n");
+    expect(disclosure).toContain("full sanitized draft");
+    expect(disclosure).toContain("> Cancel");
+    await fixture.overlay.handleInput("\r");
+    expect(fixture.actions).not.toContainEqual(expect.stringContaining("practice-consent"));
+
+    await fixture.overlay.handleInput(" ");
+    await fixture.overlay.handleInput("\u001b[C");
+    await fixture.overlay.handleInput("\r");
+    expect(fixture.actions).toContain("practice-consent:Use a before consonant sounds.");
+    const selected = plain(fixture.overlay.render(80)).join("\n");
+    expect(selected).toContain("Practice mode: On");
+    expect(selected).toContain("[selected] Use a before consonant sounds.");
+
+    await fixture.overlay.handleInput(" ");
+    expect(fixture.actions).toContain("practice-target:remove:Use a before consonant sounds.");
+    await fixture.overlay.handleInput("\u001b");
+    expect(plain(fixture.overlay.render(80)).join("\n")).toContain("Pi Fluency · Stats");
+  });
+
+  it("renders historical and Ignore-paused selections and supports direct picker controls", async () => {
+    const practice = {
+      settings: {
+        ...DEFAULT_PRACTICE_SETTINGS,
+        enabled: true,
+        consentedAt: 1,
+        snoozedUntil: 1_000,
+        targets: [
+          { explanation: "Historical selected rule", memberPatternKeys: ["history.key"] },
+          { explanation: "Ignored selected rule", memberPatternKeys: ["ignored.key"] },
+        ],
+      },
+      targets: [
+        { explanation: "Historical selected rule", memberPatternKeys: ["history.key"], rowKey: "history", currentPatternKeys: [], coachingEnabled: true },
+        { explanation: "Ignored selected rule", memberPatternKeys: ["ignored.key"], rowKey: "ignored", currentPatternKeys: ["ignored.key"], coachingEnabled: false },
+      ],
+      sessionSnoozed: true,
+      now: 100,
+    };
+    const fixture = makeOverlay({ initialView: "practice", practice });
+    const text = plain(fixture.overlay.render(80)).join("\n");
+    expect(text).toContain("Selected, not currently recurring");
+    expect(text).toContain("Selected, paused by Ignore");
+    expect(text).toContain("Session and 5-hour snooze active");
+
+    await fixture.overlay.handleInput("x");
+    await fixture.overlay.handleInput("r");
+    expect(fixture.actions).toContain("practice-enabled:false");
+    expect(fixture.actions).toContain("practice-resume");
+    await fixture.overlay.handleInput("c");
+    expect(plain(fixture.overlay.render(80)).join("\n")).toContain("> Cancel");
+    await fixture.overlay.handleInput("\u001b");
+    expect(fixture.actions).not.toContain("practice-reset");
+    await fixture.overlay.handleInput("c");
+    await fixture.overlay.handleInput("\u001b[C");
+    await fixture.overlay.handleInput("\r");
+    expect(fixture.actions).toContain("practice-reset");
+    expect(plain(fixture.overlay.render(80)).join("\n")).toContain("> Focused · Back to Stats");
+  });
+
+  it("freezes all Practice picker input while persistence is pending", async () => {
+    let release!: () => void;
+    const pending = new Promise<void>((resolve) => { release = resolve; });
+    const fixture = makeOverlay({
+      initialView: "practice",
+      practice: {
+        settings: { ...DEFAULT_PRACTICE_SETTINGS, enabled: true, consentedAt: 1, targets: [] },
+        targets: [],
+        sessionSnoozed: false,
+        now: 1,
+      },
+      overrides: { setPracticeEnabled: () => pending },
+    });
+    const saving = fixture.overlay.handleInput("x");
+    await Promise.resolve();
+    expect(plain(fixture.overlay.render(60)).join("\n")).toContain("Saving…");
+    await fixture.overlay.handleInput("\u001b");
+    expect(plain(fixture.overlay.render(60)).join("\n")).toContain("Pi Fluency · Practice");
+    release();
+    await saving;
   });
 
   it("closes and disposes on abort and preserves the custom overlay options contract", async () => {

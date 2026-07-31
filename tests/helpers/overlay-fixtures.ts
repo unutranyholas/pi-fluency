@@ -1,8 +1,13 @@
 import { vi } from "vitest";
-import { FluencyOverlay, type FluencyOverlayOptions, type IgnoreTarget } from "../../extensions/pi-fluency/overlay.js";
+import {
+  FluencyOverlay,
+  type FluencyOverlayOptions,
+  type IgnoreTarget,
+  type PracticeOverlayState,
+} from "../../extensions/pi-fluency/overlay.js";
 import type { FluencyAnalytics } from "../../extensions/pi-fluency/analytics.js";
 import { errantCategory, type ErrantCategory } from "../../extensions/pi-fluency/taxonomy.js";
-import type { ReviewPattern } from "../../extensions/pi-fluency/types.js";
+import { DEFAULT_PRACTICE_SETTINGS, type ReviewPattern } from "../../extensions/pi-fluency/types.js";
 
 const ansi = /\u001b\[[0-?]*[ -/]*[@-~]/g;
 
@@ -57,6 +62,7 @@ export function makeOverlay(options: {
   rows?: number;
   ignoredPatternKeys?: string[];
   ignoredCategories?: ErrantCategory[];
+  practice?: PracticeOverlayState;
   overrides?: Partial<FluencyOverlayOptions>;
 } = {}) {
   const actions: string[] = [];
@@ -64,6 +70,12 @@ export function makeOverlay(options: {
   const patterns = options.patterns ?? [pattern("first"), pattern("second")];
   const ignoredPatternKeys = new Set(options.ignoredPatternKeys ?? []);
   const ignoredCategories = new Set(options.ignoredCategories ?? []);
+  const practice = options.practice ?? {
+    settings: { ...DEFAULT_PRACTICE_SETTINGS, targets: [] },
+    targets: [],
+    sessionSnoozed: false,
+    now: 123,
+  };
   const overlay = new FluencyOverlay({
     tui,
     theme: { fg: (_color, text) => `\u001b[31m${text}\u001b[39m` },
@@ -82,6 +94,7 @@ export function makeOverlay(options: {
       return patterns;
     },
     stats: () => options.stats ?? emptyStats,
+    practice: () => practice,
     ...(options.initialView ? { initialView: options.initialView } : {}),
     selectIgnore: async (_title, choices) => choices[0],
     accept: (id) => {
@@ -121,6 +134,47 @@ export function makeOverlay(options: {
         if (target.kind === "pattern") ignoredPatternKeys.delete(target.value);
         else ignoredCategories.delete(target.value);
       }
+    },
+    recordPracticeConsent: (target) => {
+      actions.push(`practice-consent:${target?.explanation ?? "master"}`);
+      practice.settings = {
+        ...practice.settings,
+        revision: practice.settings.revision + (target ? 3 : 2),
+        consentedAt: practice.now,
+        enabled: true,
+        targets: target ? [target] : [],
+      };
+      practice.targets = target
+        ? [{ ...target, rowKey: `selected:${target.explanation}`, currentPatternKeys: [...target.memberPatternKeys], coachingEnabled: true }]
+        : [];
+    },
+    setPracticeTarget: (target, selected) => {
+      actions.push(`practice-target:${selected ? "select" : "remove"}:${target.explanation}`);
+      practice.settings = {
+        ...practice.settings,
+        revision: practice.settings.revision + 1,
+        targets: selected
+          ? [...practice.settings.targets.filter((item) => item.explanation !== target.explanation), target]
+          : practice.settings.targets.filter((item) => item.explanation !== target.explanation),
+      };
+      practice.targets = practice.targets.filter((item) => item.explanation !== target.explanation);
+      if (selected) practice.targets.push({ ...target, rowKey: `selected:${target.explanation}`, currentPatternKeys: [...target.memberPatternKeys], coachingEnabled: true });
+    },
+    setPracticeEnabled: (enabled) => {
+      actions.push(`practice-enabled:${enabled}`);
+      practice.settings = { ...practice.settings, revision: practice.settings.revision + 1, enabled };
+    },
+    resumePractice: () => {
+      actions.push("practice-resume");
+      const { snoozedUntil: _snoozedUntil, ...settings } = practice.settings;
+      practice.settings = { ...settings, revision: settings.revision + 1 };
+      practice.sessionSnoozed = false;
+    },
+    resetPractice: () => {
+      actions.push("practice-reset");
+      practice.settings = { ...DEFAULT_PRACTICE_SETTINGS, revision: practice.settings.revision + 1, epoch: practice.settings.epoch + 1, targets: [] };
+      practice.targets = [];
+      practice.sessionSnoozed = false;
     },
     viewChanged: (view) => { actions.push(`view:${view}`); },
     close: () => { actions.push("close"); },

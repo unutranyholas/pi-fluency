@@ -11,17 +11,27 @@ import {
   type TUI,
   wrapTextWithAnsi,
 } from "@earendil-works/pi-tui";
-import { computeFluencyAnalytics, type FluencyAnalytics, type RuleAnalytics } from "./analytics.js";
+import {
+  computeFluencyAnalytics,
+  resolvePracticeTargets,
+  type FluencyAnalytics,
+  type RuleAnalytics,
+} from "./analytics.js";
 import { compactDiffFallback, renderCompactDiff } from "./diff.js";
 import type { FluencyStore } from "./store.js";
-import type { ReviewPattern } from "./types.js";
+import type {
+  PracticeSettings,
+  PracticeTarget,
+  ResolvedPracticeTarget,
+  ReviewPattern,
+} from "./types.js";
 import {
   ERRANT_CATEGORY_LABELS,
   errantCategory,
   type ErrantCategory,
 } from "./taxonomy.js";
 
-export type FluencyView = "inbox" | "accepted" | "ignored" | "stats";
+export type FluencyView = "inbox" | "accepted" | "ignored" | "stats" | "practice";
 type SelectionKeybinding =
   | "tui.select.up"
   | "tui.select.down"
@@ -31,12 +41,20 @@ type SelectionKeybinding =
 export type IgnoreTarget = { kind: "pattern"; value: string } | { kind: "category"; value: ErrantCategory };
 type MaybePromise = void | Promise<void>;
 
+export interface PracticeOverlayState {
+  settings: PracticeSettings;
+  targets: ResolvedPracticeTarget[];
+  sessionSnoozed: boolean;
+  now: number;
+}
+
 export interface FluencyOverlayOptions {
   tui: Pick<TUI, "requestRender"> & { terminal?: { readonly rows: number } };
   theme: Pick<Theme, "fg">;
   keybindings: { matches(data: string, keybinding: SelectionKeybinding): boolean };
   patterns(): ReviewPattern[];
   stats(): FluencyAnalytics;
+  practice?(): PracticeOverlayState;
   initialView?: FluencyView;
   ignoredBy?(pattern: ReviewPattern): IgnoreTarget[];
   selectIgnore?(title: string, options: string[]): Promise<string | undefined>;
@@ -45,6 +63,11 @@ export interface FluencyOverlayOptions {
   ignorePattern(patternKey: string, pattern: ReviewPattern): MaybePromise;
   ignoreCategory(category: ErrantCategory, pattern: ReviewPattern): MaybePromise;
   restoreIgnored(targets: IgnoreTarget[], pattern: ReviewPattern): MaybePromise;
+  recordPracticeConsent?(target?: PracticeTarget): MaybePromise;
+  setPracticeTarget?(target: PracticeTarget, selected: boolean): MaybePromise;
+  setPracticeEnabled?(enabled: boolean): MaybePromise;
+  resumePractice?(): MaybePromise;
+  resetPractice?(): MaybePromise;
   close(): void;
   viewChanged?(view: FluencyView): void;
   mutationError?(error: unknown): void;
@@ -57,6 +80,16 @@ const HEADER_LINES = 2;
 const FOOTER_LINES = 3;
 const BORDER_LINES = 2;
 const DETAIL_SCROLL_STEP = 5;
+
+interface PracticeRow {
+  rowKey: string;
+  target: PracticeTarget;
+  selected: boolean;
+  paused: boolean;
+  section: "recurring" | "historical" | "paused";
+}
+
+type PracticeConfirmation = { kind: "consent"; target?: PracticeTarget } | { kind: "reset" };
 
 interface SourceSegment {
   text: string;
@@ -153,6 +186,12 @@ export class FluencyOverlay implements Component {
   private disposed = false;
   private loadError: string | undefined;
   private actionError: string | undefined;
+  private practiceIndex = 0;
+  private practiceFocusKey: string | undefined;
+  private practicePending = false;
+  private practiceConfirmation: PracticeConfirmation | undefined;
+  private confirmationCancelFocused = true;
+  private practiceResetComplete = false;
   private callbacks: FluencyOverlayOptions | undefined;
 
   constructor(options: FluencyOverlayOptions) {
@@ -186,7 +225,7 @@ export class FluencyOverlay implements Component {
   }
 
   private items(): ReviewPattern[] {
-    if (this.view === "stats") return [];
+    if (this.view === "stats" || this.view === "practice") return [];
     const items = this.getPatterns().filter((pattern) => {
       const ignored = this.ignoredBy(pattern).length > 0;
       if (this.view === "ignored") return ignored;
@@ -236,13 +275,214 @@ export class FluencyOverlay implements Component {
     this.changed();
   }
 
+  private getPractice(): PracticeOverlayState | undefined {
+    try {
+      const practice = this.callbacks?.practice?.();
+      this.loadError = undefined;
+      return practice;
+    } catch (error) {
+      this.loadError = sanitizedError(error);
+      return undefined;
+    }
+  }
+
+  private practiceRows(stats: FluencyAnalytics, practice: PracticeOverlayState): PracticeRow[] {
+    const selectedByExplanation = new Map(practice.targets.map((target) => [target.explanation, target]));
+    const recurring: PracticeRow[] = stats.rules.flatMap((rule) => {
+      const selected = selectedByExplanation.get(rule.explanation);
+      if (selected && !selected.coachingEnabled) return [];
+      return [{
+        rowKey: rule.rowKey,
+        target: { explanation: rule.explanation, memberPatternKeys: [...rule.memberPatternKeys] },
+        selected: selected !== undefined,
+        paused: false,
+        section: "recurring" as const,
+      }];
+    });
+    const recurringExplanations = new Set(stats.rules.map((rule) => rule.explanation));
+    const historical: PracticeRow[] = practice.targets
+      .filter((target) => target.coachingEnabled && !recurringExplanations.has(target.explanation))
+      .map((target) => ({
+        rowKey: target.rowKey,
+        target: { explanation: target.explanation, memberPatternKeys: [...target.memberPatternKeys] },
+        selected: true,
+        paused: false,
+        section: "historical" as const,
+      }));
+    const paused: PracticeRow[] = practice.targets
+      .filter((target) => !target.coachingEnabled)
+      .map((target) => ({
+        rowKey: target.rowKey,
+        target: { explanation: target.explanation, memberPatternKeys: [...target.memberPatternKeys] },
+        selected: true,
+        paused: true,
+        section: "paused" as const,
+      }));
+    const rows = [...recurring, ...historical, ...paused];
+    if (this.practiceFocusKey) {
+      const index = rows.findIndex((row) => row.rowKey === this.practiceFocusKey);
+      if (index >= 0) this.practiceIndex = index;
+    }
+    this.practiceIndex = Math.max(0, Math.min(this.practiceIndex, Math.max(0, rows.length - 1)));
+    this.practiceFocusKey = rows[this.practiceIndex]?.rowKey;
+    return rows;
+  }
+
+  private async performPractice(action: () => MaybePromise, focusKey?: string): Promise<boolean> {
+    if (this.practicePending) return false;
+    this.clearActionError();
+    this.practicePending = true;
+    this.changed();
+    try {
+      await action();
+      if (this.disposed) return false;
+      this.actionError = undefined;
+      return true;
+    } catch (error) {
+      if (this.disposed) return false;
+      this.actionError = sanitizedError(error);
+      this.practiceFocusKey = focusKey;
+      try { this.callbacks?.mutationError?.(error); } catch { /* advisory */ }
+      return false;
+    } finally {
+      if (!this.disposed) {
+        this.practicePending = false;
+        this.changed();
+      }
+    }
+  }
+
+  private cancelPracticeConfirmation(): void {
+    this.practiceConfirmation = undefined;
+    this.confirmationCancelFocused = true;
+    this.changed();
+  }
+
+  private async activatePracticeConfirmation(): Promise<void> {
+    const confirmation = this.practiceConfirmation;
+    const callbacks = this.callbacks;
+    if (!confirmation || !callbacks) return;
+    if (this.confirmationCancelFocused) {
+      this.cancelPracticeConfirmation();
+      return;
+    }
+    this.practiceConfirmation = undefined;
+    if (confirmation.kind === "reset") {
+      const reset = await this.performPractice(() => callbacks.resetPractice?.());
+      if (reset) {
+        this.practiceIndex = 0;
+        this.practiceFocusKey = undefined;
+        this.practiceResetComplete = true;
+      }
+      return;
+    }
+    await this.performPractice(() => callbacks.recordPracticeConsent?.(confirmation.target), this.practiceFocusKey);
+  }
+
+  private async handlePracticeInput(data: string): Promise<void> {
+    const callbacks = this.callbacks;
+    if (!callbacks || this.practicePending) return;
+    if (this.practiceConfirmation) {
+      if (callbacks.keybindings.matches(data, "tui.select.cancel")) this.cancelPracticeConfirmation();
+      else if (matchesKey(data, Key.left) || matchesKey(data, Key.right) || data === "\t" || matchesKey(data, Key.tab)) {
+        this.confirmationCancelFocused = !this.confirmationCancelFocused;
+        this.changed();
+      } else if (data === "\r" || data === "\n") await this.activatePracticeConfirmation();
+      return;
+    }
+    if (callbacks.keybindings.matches(data, "tui.select.cancel")) {
+      this.view = "stats";
+      this.resetDetailPaging();
+      callbacks.viewChanged?.("stats");
+      this.changed();
+      return;
+    }
+    if (this.practiceResetComplete) {
+      if (data === "\r" || data === "\n") {
+        this.view = "stats";
+        callbacks.viewChanged?.("stats");
+        this.changed();
+      }
+      return;
+    }
+    const stats = this.getStats();
+    const practice = this.getPractice();
+    if (!stats || !practice) return;
+    const rows = this.practiceRows(stats, practice);
+    if (callbacks.keybindings.matches(data, "tui.select.up") || data === "k") {
+      this.practiceIndex = Math.max(0, this.practiceIndex - 1);
+      this.practiceFocusKey = rows[this.practiceIndex]?.rowKey;
+      this.clearActionError();
+      this.changed();
+      return;
+    }
+    if (callbacks.keybindings.matches(data, "tui.select.down") || data === "j") {
+      this.practiceIndex = Math.min(Math.max(0, rows.length - 1), this.practiceIndex + 1);
+      this.practiceFocusKey = rows[this.practiceIndex]?.rowKey;
+      this.clearActionError();
+      this.changed();
+      return;
+    }
+    if ((data === "\r" || data === "\n") && rows.length === 0) {
+      this.view = "stats";
+      callbacks.viewChanged?.("stats");
+      this.changed();
+      return;
+    }
+    if (data === " " && rows.length > 0) {
+      const row = rows[this.practiceIndex]!;
+      if (!row.selected && practice.settings.consentedAt === undefined) {
+        this.practiceConfirmation = { kind: "consent", target: row.target };
+        this.confirmationCancelFocused = true;
+        this.changed();
+        return;
+      }
+      await this.performPractice(() => callbacks.setPracticeTarget?.(row.target, !row.selected), row.rowKey);
+      return;
+    }
+    if (data === "x") {
+      if (!practice.settings.enabled && practice.settings.consentedAt === undefined) {
+        this.practiceConfirmation = { kind: "consent" };
+        this.confirmationCancelFocused = true;
+        this.changed();
+        return;
+      }
+      await this.performPractice(() => callbacks.setPracticeEnabled?.(!practice.settings.enabled));
+      return;
+    }
+    if (data === "r" && (practice.sessionSnoozed || (practice.settings.snoozedUntil ?? 0) > practice.now)) {
+      await this.performPractice(() => callbacks.resumePractice?.());
+      return;
+    }
+    if (data === "c") {
+      this.practiceConfirmation = { kind: "reset" };
+      this.confirmationCancelFocused = true;
+      this.changed();
+    }
+  }
+
   async handleInput(data: string): Promise<void> {
     const callbacks = this.callbacks;
     if (this.disposed || !callbacks) return;
     const items = this.items();
 
+    if (this.view === "practice") {
+      await this.handlePracticeInput(data);
+      return;
+    }
     if (callbacks.keybindings.matches(data, "tui.select.cancel")) {
       callbacks.close();
+      return;
+    }
+    if (data === "p" && this.view === "stats") {
+      this.clearActionError();
+      this.view = "practice";
+      this.practiceIndex = 0;
+      this.practiceFocusKey = undefined;
+      this.practiceResetComplete = false;
+      this.resetDetailPaging();
+      callbacks.viewChanged?.("practice");
+      this.changed();
       return;
     }
     if (data === "\t" || matchesKey(data, Key.tab)) {
@@ -414,7 +654,7 @@ export class FluencyOverlay implements Component {
     return `${arrow}${change}`;
   }
 
-  private statsLines(stats: FluencyAnalytics, width: number): string[] {
+  private statsLines(stats: FluencyAnalytics, width: number, practice?: PracticeOverlayState): string[] {
     const body: string[] = [];
     const append = (text = ""): void => {
       const wrapped = wrapTextWithAnsi(text, Math.max(1, width - 1));
@@ -449,8 +689,9 @@ export class FluencyOverlay implements Component {
     if (stats.rules.length === 0) {
       append("No recurring concrete rules in this period.");
     } else {
+      const selected = new Set(practice?.settings.targets.map((target) => target.explanation) ?? []);
       for (const rule of stats.rules) {
-        append(rule.explanation);
+        append(`${selected.has(rule.explanation) ? "[Selected for practice] " : ""}${rule.explanation}`);
         const ruleRate = rule.ratePerThousand === undefined ? "—/k" : `${rule.ratePerThousand.toFixed(1)}/k`;
         append(`${ruleRate}  ${this.ruleTrend(rule)}  ${rule.sparkline}`);
         append();
@@ -459,15 +700,72 @@ export class FluencyOverlay implements Component {
     return body;
   }
 
-  private visibleStatsLines(stats: FluencyAnalytics, width: number, available: number): string[] {
+  private visibleStatsLines(stats: FluencyAnalytics, width: number, available: number, practice?: PracticeOverlayState): string[] {
     if (available <= 0) {
       this.resetDetailPaging();
       return [];
     }
-    const body = this.statsLines(stats, width);
+    const body = this.statsLines(stats, width, practice);
     this.maxDetailOffset = Math.max(0, body.length - available);
     this.detailOffset = Math.min(this.detailOffset, this.maxDetailOffset);
     return body.slice(this.detailOffset, this.detailOffset + available);
+  }
+
+  private practiceBodyLines(stats: FluencyAnalytics, practice: PracticeOverlayState, width: number): string[] {
+    const rows = this.practiceRows(stats, practice);
+    const lines: string[] = [];
+    const append = (text = ""): void => {
+      const wrapped = wrapTextWithAnsi(text, Math.max(1, width - 1));
+      if (wrapped.length === 0) lines.push("");
+      else wrapped.forEach((line) => lines.push(` ${line}`));
+    };
+    if (this.practiceResetComplete) {
+      append("Practice reset. Selections, consent, mode, and snoozes cleared.");
+      append("> Focused · Back to Stats (Enter or Esc)");
+      return lines;
+    }
+    const globalSnoozed = (practice.settings.snoozedUntil ?? 0) > practice.now;
+    append(`Practice mode: ${practice.settings.enabled ? "On" : "Off"}`);
+    append(`Selected targets: ${practice.settings.targets.length}`);
+    append(`Snooze: ${practice.sessionSnoozed && globalSnoozed ? "Session and 5-hour snooze active" : practice.sessionSnoozed ? "Session snooze active" : globalSnoozed ? "5-hour snooze active" : "Not snoozed"}`);
+    append();
+    if (rows.length === 0) {
+      append("No recurring rules or saved practice targets.");
+      if (this.actionError) append(`Action failed: ${this.actionError}`);
+      append("> Focused · Back to Stats (Enter or Esc)");
+      return lines;
+    }
+    const labels: Record<PracticeRow["section"], string> = {
+      recurring: "Recurring choices",
+      historical: "Selected, not currently recurring",
+      paused: "Selected, paused by Ignore",
+    };
+    let section: PracticeRow["section"] | undefined;
+    rows.forEach((row, index) => {
+      if (row.section !== section) {
+        if (section !== undefined) append();
+        section = row.section;
+        append(labels[section]);
+      }
+      const focus = index === this.practiceIndex ? "> Focused" : "  Not focused";
+      const state = row.paused ? "selected, paused" : row.selected ? "selected" : "not selected";
+      append(`${focus} · [${state}] ${row.target.explanation}`);
+      if (this.actionError && index === this.practiceIndex) append(`Action failed: ${this.actionError}`);
+    });
+    return lines;
+  }
+
+  private confirmationLines(width: number): string[] {
+    const confirmation = this.practiceConfirmation;
+    if (!confirmation) return [];
+    const message = confirmation.kind === "consent"
+      ? "Preflight disclosure: Before main submission, full sanitized draft goes to configured Fluency model. Draft may be analyzed even if you later choose not to send it."
+      : "Reset practice? This clears selected targets, consent, practice mode, and snoozes. Fluency history stays unchanged.";
+    const lines = wrapTextWithAnsi(message, Math.max(1, width - 2)).map((line) => ` ${line}`);
+    lines.push("");
+    lines.push(this.confirmationCancelFocused ? " > Cancel    Confirm" : "   Cancel  > Confirm");
+    lines.push(" Left/Right or Tab choose · Enter activate · Esc cancel");
+    return lines;
   }
 
   render(width: number): string[] {
@@ -478,12 +776,15 @@ export class FluencyOverlay implements Component {
     const budget = this.verticalBudget();
     const innerBudget = Math.max(0, budget - BORDER_LINES);
     const items = this.items();
-    const stats = this.view === "stats" ? this.getStats() : undefined;
+    const stats = this.view === "stats" || this.view === "practice" ? this.getStats() : undefined;
+    const practice = (this.view === "stats" || this.view === "practice") && stats ? this.getPractice() : undefined;
     const title = ` Pi Fluency · ${this.view[0]!.toUpperCase()}${this.view.slice(1)}`;
     const noun = this.view === "inbox" ? "pending" : this.view;
     const selected = items[this.selectedIndex];
     const paging = this.view === "stats"
       ? "30 days"
+      : this.view === "practice"
+        ? "keyboard targets"
       : selected
         ? `Pending ${selected.pendingCount} · accepted ${selected.acceptedCount} · ← ${this.selectedIndex + 1} / ${items.length} →`
         : `0 ${noun}`;
@@ -495,10 +796,22 @@ export class FluencyOverlay implements Component {
 
     if (this.loadError) {
       this.resetDetailPaging();
-      lines.push(` Could not load ${this.view === "stats" ? "statistics" : "patterns"}: ${this.loadError}`);
+      lines.push(` Could not load ${this.view === "stats" ? "statistics" : this.view === "practice" ? "practice settings" : "patterns"}: ${this.loadError}`);
     } else if (this.view === "stats" && stats) {
       const reserved = headerLines.length + 1 + FOOTER_LINES;
-      lines.push(...this.visibleStatsLines(stats, contentWidth, Math.max(1, innerBudget - reserved)));
+      lines.push(...this.visibleStatsLines(stats, contentWidth, Math.max(1, innerBudget - reserved), practice));
+    } else if (this.view === "practice" && stats && practice) {
+      const reserved = headerLines.length + 1 + FOOTER_LINES;
+      const available = Math.max(1, innerBudget - reserved);
+      if (this.practiceConfirmation) {
+        lines.push(...this.confirmationLines(contentWidth).slice(0, available));
+      } else {
+        const body = this.practiceBodyLines(stats, practice, contentWidth);
+        // Keep focused row visible at short heights while preserving section context when possible.
+        const focusedLine = body.findIndex((line) => line.includes("> Focused"));
+        const start = focusedLine < 0 ? 0 : Math.max(0, Math.min(focusedLine - 2, body.length - available));
+        lines.push(...body.slice(start, start + available));
+      }
     } else {
       if (this.actionError) lines.push(` Action failed: ${this.actionError}`);
       if (items.length === 0) {
@@ -512,8 +825,13 @@ export class FluencyOverlay implements Component {
 
     lines.push(` ${"─".repeat(Math.max(0, contentWidth - 2))}`);
     if (this.view === "stats") {
-      lines.push(" ↑↓/jk scroll  pgup/pgdn");
+      lines.push(" ↑↓/jk scroll  pgup/pgdn  p practice targets");
       lines.push(" tab view  esc close");
+    } else if (this.view === "practice") {
+      if (this.practicePending) lines.push(" Saving…");
+      else if (this.practiceConfirmation) lines.push(" Confirmation open");
+      else lines.push(" ↑↓/jk move  Space toggle  x practice on/off");
+      lines.push(" r resume now  c reset practice  esc back to Stats");
     } else {
       if (this.view === "inbox") lines.push(" ←→ card  ↑↓/jk scroll  a accept  d dismiss");
       else lines.push(" ←→ card  ↑↓/jk scroll");
@@ -532,6 +850,11 @@ export class FluencyOverlay implements Component {
   }
 }
 
+export interface PracticeOverlayRuntime {
+  sessionSnoozed(): boolean;
+  resumeSession(): void;
+}
+
 export async function showFluencyOverlay(
   ctx: ExtensionContext,
   store: FluencyStore,
@@ -540,6 +863,7 @@ export async function showFluencyOverlay(
   onMutationError?: (error: unknown) => void,
   initialView: FluencyView = "inbox",
   now: () => number = Date.now,
+  practiceRuntime?: PracticeOverlayRuntime,
 ): Promise<void> {
   if (ctx.mode !== "tui") {
     ctx.ui.notify("Pi Fluency inbox requires interactive TUI mode", "warning");
@@ -571,6 +895,22 @@ export async function showFluencyOverlay(
               ignoredCategories: new Set(snapshot.ignoredCategories),
               now: now(),
             });
+          },
+          practice: () => {
+            const snapshot = store.getAnalyticsSnapshot();
+            const settings = store.getSettings();
+            const practiceSettings = store.getPracticeSettings();
+            return {
+              settings: practiceSettings,
+              targets: resolvePracticeTargets({
+                targets: practiceSettings.targets,
+                patterns: snapshot.patterns,
+                ignoredPatternKeys: new Set(settings.ignoredPatternKeys),
+                ignoredCategories: new Set(settings.ignoredCategories),
+              }),
+              sessionSnoozed: practiceRuntime?.sessionSnoozed() ?? false,
+              now: now(),
+            };
           },
           initialView,
           ignoredBy: (pattern) => {
@@ -610,6 +950,18 @@ export async function showFluencyOverlay(
             });
             onProgressChanged?.();
           },
+          recordPracticeConsent: async (target) => {
+            await store.recordPracticeConsent(now());
+            if (target) await store.setPracticeTarget(target, true);
+            await store.setPracticeEnabled(true);
+          },
+          setPracticeTarget: (target, selected) => store.setPracticeTarget(target, selected),
+          setPracticeEnabled: (enabled) => store.setPracticeEnabled(enabled),
+          resumePractice: async () => {
+            await store.resumePractice();
+            practiceRuntime?.resumeSession();
+          },
+          resetPractice: () => store.resetPractice(),
           ...(onMutationError ? { mutationError: onMutationError } : {}),
           close: () => done(),
         });

@@ -785,12 +785,46 @@ describe("Pi Fluency extension", () => {
     expect(harness.notifications.at(-1)?.message).toContain("queued=0");
   });
 
+  it("opens Practice directly and supports consented on/off, resume, reset, and status", async () => {
+    const harness = await createExtensionHarness({ enabled: true });
+    const openInbox = vi.fn<OpenInbox>(async (_ctx, _store, options) => {
+      expect(options.initialView).toBe("practice");
+    });
+    createFluencyExtension({ ...harness.deps, openInbox })(harness.pi);
+
+    await harness.runCommand("practice");
+    expect(openInbox).toHaveBeenCalledOnce();
+
+    harness.confirm.mockResolvedValueOnce(false);
+    await harness.runCommand("practice on");
+    let practice = (await FluencyStore.open(harness.deps.rootDir)).getPracticeSettings();
+    expect(practice.enabled).toBe(false);
+    expect(practice.consentedAt).toBeUndefined();
+
+    harness.confirm.mockResolvedValueOnce(true);
+    await harness.runCommand("practice on");
+    practice = (await FluencyStore.open(harness.deps.rootDir)).getPracticeSettings();
+    expect(practice.enabled).toBe(true);
+    expect(practice.consentedAt).toBe(123);
+
+    await harness.runCommand("practice off");
+    await harness.runCommand("practice resume");
+    await harness.runCommand("status");
+    expect(harness.notifications.at(-1)?.message).toContain("practice=off; practice-selected=0; practice-snooze=none");
+
+    harness.confirm.mockResolvedValueOnce(true);
+    await harness.runCommand("practice reset");
+    practice = (await FluencyStore.open(harness.deps.rootDir)).getPracticeSettings();
+    expect(practice).toMatchObject({ enabled: false, targets: [], epoch: 1 });
+    expect(practice.consentedAt).toBeUndefined();
+  });
+
   it("rejects unknown command arguments with usage", async () => {
     const harness = await createExtensionHarness({ enabled: true });
     createFluencyExtension(harness.deps)(harness.pi);
     await harness.runCommand("wat");
     expect(harness.notifications.at(-1)).toEqual({
-      message: "Usage: /fluency [pause|resume|status|model|clear|stats]",
+      message: "Usage: /fluency [pause|resume|status|model|clear|stats|practice [on|off|resume|reset]]",
       type: "warning",
     });
   });
