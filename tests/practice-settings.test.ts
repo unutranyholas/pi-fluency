@@ -5,6 +5,7 @@ import {
   FIVE_HOURS_MS,
   MAX_PRACTICE_FIELD_LENGTH,
   PRACTICE_SESSION_ENTRY_TYPE,
+  PRACTICE_SESSION_RESUME_ENTRY_TYPE,
   PracticeSessionSnooze,
   canonicalizePracticeTargets,
   decodePracticeSettings,
@@ -194,14 +195,39 @@ describe("conversation-session practice snooze", () => {
     expect(new PracticeSessionSnooze().restore(entries, "/sessions/original.jsonl", 4)).toBe(true);
   });
 
+  it("durably resumes same-file snooze using latest applicable session entry", () => {
+    const sessionFile = "/sessions/original.jsonl";
+    const entries: Array<{ type: string; customType: string; data: unknown }> = [];
+    const appendEntry = (customType: string, data: unknown) => {
+      entries.push({ type: "custom", customType, data });
+    };
+    const state = new PracticeSessionSnooze();
+
+    state.snooze(sessionFile, 4, appendEntry);
+    state.resume(sessionFile, 4, appendEntry);
+
+    expect(entries.at(-1)).toMatchObject({
+      customType: PRACTICE_SESSION_RESUME_ENTRY_TYPE,
+      data: { epoch: 4, sessionHash: hashPracticeSessionFile(sessionFile) },
+    });
+    expect(new PracticeSessionSnooze().restore(entries, sessionFile, 4)).toBe(false);
+    expect(new PracticeSessionSnooze().restore(entries, "/sessions/fork.jsonl", 4)).toBe(false);
+
+    state.snooze(sessionFile, 4, appendEntry);
+    expect(new PracticeSessionSnooze().restore(entries, sessionFile, 4)).toBe(true);
+    expect(new PracticeSessionSnooze().restore(entries, sessionFile, 5)).toBe(false);
+  });
+
   it("uses runtime-only state for ephemeral sessions", () => {
     const state = new PracticeSessionSnooze();
     let appended = false;
-    state.snooze(undefined, 2, () => { appended = true; });
+    const appendEntry = () => { appended = true; };
+    state.snooze(undefined, 2, appendEntry);
     expect(appended).toBe(false);
     expect(state.restore([], undefined, 2)).toBe(true);
     expect(state.restore([], undefined, 3)).toBe(false);
-    state.resume();
+    state.resume(undefined, 2, appendEntry);
     expect(state.restore([], undefined, 2)).toBe(false);
+    expect(appended).toBe(false);
   });
 });

@@ -11,6 +11,7 @@ export const MAX_PRACTICE_FIELD_LENGTH = 500;
 export const MAX_PRACTICE_MEMBER_KEYS = 500;
 export const FIVE_HOURS_MS = 5 * 60 * 60 * 1_000;
 export const PRACTICE_SESSION_ENTRY_TYPE = "pi-fluency-practice-snooze";
+export const PRACTICE_SESSION_RESUME_ENTRY_TYPE = "pi-fluency-practice-resume";
 
 const CONTROL_CHARACTER = /[\u0000-\u001f\u007f-\u009f]/;
 const PRACTICE_KEYS = new Set([
@@ -154,11 +155,16 @@ export class PracticeSessionSnooze {
   restore(entries: readonly CustomSessionEntryLike[], sessionFile: string | undefined, epoch: number): boolean {
     if (sessionFile === undefined) return this.ephemeralEpoch === epoch;
     const expectedHash = hashPracticeSessionFile(sessionFile);
-    return entries.some((entry) => {
-      if (entry.type !== "custom" || entry.customType !== PRACTICE_SESSION_ENTRY_TYPE) return false;
+    for (let index = entries.length - 1; index >= 0; index -= 1) {
+      const entry = entries[index]!;
+      if (entry.type !== "custom"
+        || (entry.customType !== PRACTICE_SESSION_ENTRY_TYPE
+          && entry.customType !== PRACTICE_SESSION_RESUME_ENTRY_TYPE)) continue;
       const data = decodeSessionSnooze(entry.data);
-      return data?.epoch === epoch && data.sessionHash === expectedHash;
-    });
+      if (data?.epoch !== epoch || data.sessionHash !== expectedHash) continue;
+      return entry.customType === PRACTICE_SESSION_ENTRY_TYPE;
+    }
+    return false;
   }
 
   snooze(
@@ -177,7 +183,19 @@ export class PracticeSessionSnooze {
     });
   }
 
-  resume(): void {
-    this.ephemeralEpoch = undefined;
+  resume(
+    sessionFile: string | undefined,
+    epoch: number,
+    appendEntry: (customType: string, data: PracticeSessionSnoozeEntry) => void,
+  ): void {
+    if (sessionFile === undefined) {
+      this.ephemeralEpoch = undefined;
+      return;
+    }
+    appendEntry(PRACTICE_SESSION_RESUME_ENTRY_TYPE, {
+      schemaVersion: PRACTICE_SCHEMA_VERSION,
+      epoch,
+      sessionHash: hashPracticeSessionFile(sessionFile),
+    });
   }
 }

@@ -463,6 +463,7 @@ export class FluencyStore {
         if (Date.now() >= deadline) throw new Error("Practice policy read deadline exceeded");
         return value;
       } catch (error) {
+        if (Date.now() >= deadline) throw new Error("Practice policy read deadline exceeded");
         if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
         throw error;
       }

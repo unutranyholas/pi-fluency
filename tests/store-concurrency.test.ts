@@ -2,7 +2,7 @@ import { access, chmod, mkdir, readFile, rename, rm, stat, utimes, writeFile } f
 import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { lock, type LockOptions } from "proper-lockfile";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { FluencyStore } from "../extensions/pi-fluency/store.js";
 import { DEFAULT_SETTINGS, type AnalysisResult, type FluencySettings } from "../extensions/pi-fluency/types.js";
 import {
@@ -215,6 +215,33 @@ describe("FluencyStore concurrency", () => {
       expect(store.getPracticeSettings().targets).toEqual([]);
     } finally {
       storeClass.policyFileReader = originalReader;
+    }
+  });
+
+  it("rejects a policy snapshot when the final missing-file read crosses its deadline", async () => {
+    const store = await FluencyStore.open(root);
+    type PolicyFileReader = (path: string) => Promise<string>;
+    const storeClass = FluencyStore as unknown as { policyFileReader: PolicyFileReader };
+    const originalReader = storeClass.policyFileReader;
+    const settings = JSON.stringify(DEFAULT_SETTINGS);
+    let now = 10;
+    let reads = 0;
+    const nowSpy = vi.spyOn(Date, "now").mockImplementation(() => now);
+    storeClass.policyFileReader = async (path) => {
+      reads += 1;
+      if (path.endsWith("practice.json")) {
+        if (reads === 4) now = 20;
+        throw Object.assign(new Error("missing"), { code: "ENOENT" });
+      }
+      return settings;
+    };
+
+    try {
+      await expect(store.getFreshPolicySnapshot(20)).rejects.toThrow("Practice policy read deadline exceeded");
+      expect(reads).toBe(4);
+    } finally {
+      storeClass.policyFileReader = originalReader;
+      nowSpy.mockRestore();
     }
   });
 
