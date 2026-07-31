@@ -1243,6 +1243,64 @@ describe("Pi Fluency extension", () => {
     });
   });
 
+  it("reports a cross-store target deselection after provider completion without stale foreground commit", async () => {
+    const harness = await createExtensionHarness({ enabled: true });
+    const extensionStore = await FluencyStore.open(harness.deps.rootDir);
+    const target = {
+      explanation: oneMistake.mistakes[0]!.explanation,
+      memberPatternKeys: [oneMistake.mistakes[0]!.patternKey],
+    };
+    await extensionStore.activatePractice(2, target);
+
+    let providerCompleted = false;
+    let signalPostAnalysisRead!: () => void;
+    const postAnalysisRead = new Promise<void>((resolve) => { signalPostAnalysisRead = resolve; });
+    let releasePostAnalysisRead!: () => void;
+    const postAnalysisReadRelease = new Promise<void>((resolve) => { releasePostAnalysisRead = resolve; });
+    const originalGetFreshPolicySnapshot = extensionStore.getFreshPolicySnapshot.bind(extensionStore);
+    let heldPostAnalysisRead = false;
+    vi.spyOn(extensionStore, "getFreshPolicySnapshot").mockImplementation(async (...args) => {
+      if (providerCompleted && !heldPostAnalysisRead) {
+        heldPostAnalysisRead = true;
+        signalPostAnalysisRead();
+        await postAnalysisReadRelease;
+      }
+      return originalGetFreshPolicySnapshot(...args);
+    });
+    harness.analyzer.analyze.mockImplementationOnce(async () => {
+      providerCompleted = true;
+      return oneMistake;
+    });
+    const showCoaching = vi.fn(async (_ctx, check) => {
+      expect(await check).toEqual({ kind: "failure" });
+      return "technical-failure" as const;
+    });
+    createFluencyExtension({
+      ...harness.deps,
+      openStore: async () => extensionStore,
+      showCoaching,
+    })(harness.pi);
+
+    const input = harness.emitInput("I made an mistake before target deselection elsewhere.");
+    await postAnalysisRead;
+    const externalStore = await FluencyStore.open(harness.deps.rootDir);
+    await externalStore.setPracticeTarget(target, false);
+    releasePostAnalysisRead();
+
+    await expect(input).resolves.toEqual({ action: "continue" });
+    expect(harness.editorText).toBe("");
+    expect(harness.notifications.at(-1)?.message).toBe(
+      "Sent without practice check — practice settings changed.",
+    );
+    expect((await FluencyStore.open(harness.deps.rootDir)).getAnalyticsSnapshot().observations).toEqual([]);
+
+    await harness.emitAgentSettled();
+    await vi.waitFor(() => expect(harness.analyzer.analyze).toHaveBeenCalledTimes(2));
+    await vi.waitFor(async () => {
+      expect((await FluencyStore.open(harness.deps.rootDir)).getAnalyticsSnapshot().observations).toHaveLength(1);
+    });
+  });
+
   it("allows a successful practice check after 6.1 seconds", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(20_000);

@@ -78,3 +78,20 @@ Fix commit: `12a818f` (`fix: close practice timeout review gaps`)
 ## Concerns
 
 None known. Injectable `openStore` expands only test/dependency seam; production default remains `FluencyStore.open(rootDir)`.
+
+## Final Gate-Change Blocker Fix
+
+Post-analysis `gate-changed` revalidation now returns the same settings-change failure as analytics and analyzer changes. Analytics-disabled still fences background work; gate changes retain ordinary background analytics only under the worker's fresh authorization check.
+
+Added a public extension/store regression that pauses the post-provider policy reread, deselects the active target through a second store instance, and verifies:
+
+- exact `Sent without practice check — practice settings changed.` warning
+- input continues with editor cleared rather than stale coaching block
+- no foreground analysis commit
+- authorized background analytics can run after `agent_settled`
+
+Validation:
+
+- `npx vitest run tests/extension.test.ts` — passed, 86 tests
+- `npm run check` — passed, TypeScript plus 25 files / 452 tests
+- `git diff --check` — passed

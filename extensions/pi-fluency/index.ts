@@ -750,7 +750,9 @@ function registerHandlers(pi: ExtensionAPI, dependencies: ResolvedDependencies):
           checkSessionSnoozed,
         );
         analyzerChangeObserved = revalidation === "analyzer-changed";
-        if (revalidation === "analytics-disabled" || revalidation === "analyzer-changed") {
+        if (revalidation === "analytics-disabled"
+          || revalidation === "analyzer-changed"
+          || revalidation === "gate-changed") {
           technicalFailureMessage = "Sent without practice check — practice settings changed.";
           if (revalidation === "analytics-disabled") backgroundAllowed = false;
           return { kind: "failure" };
