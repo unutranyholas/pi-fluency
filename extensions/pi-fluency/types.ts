@@ -161,6 +161,8 @@ export interface PracticeSettings {
 export interface PracticePolicySnapshot {
   settings: FluencySettings;
   practice: PracticeSettings;
+  /** Fresh durable history generation captured with authorization/configuration. */
+  historyGeneration: string;
 }
 
 export const DEFAULT_PRACTICE_SETTINGS: PracticeSettings = {

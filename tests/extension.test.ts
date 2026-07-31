@@ -395,6 +395,7 @@ describe("Pi Fluency extension", () => {
 
     await harness.emitInput("I made an mistake.");
     await harness.emitAgentSettled();
+    await vi.waitFor(() => expect(harness.analyzer.analyze).toHaveBeenCalledOnce());
     const firstShutdown = harness.emitSessionShutdown("reload");
     const secondShutdown = harness.emitSessionShutdown("reload");
     let firstSettled = false;
@@ -461,14 +462,14 @@ describe("Pi Fluency extension", () => {
     createFluencyExtension(harness.deps)(harness.pi);
     await harness.emitInput("I made an mistake.");
     await harness.emitAgentSettled();
+    await vi.waitFor(() => expect(harness.analyzer.analyze).toHaveBeenCalledOnce());
 
     vi.useFakeTimers();
     try {
       harness.rejectAnalysis(new Error("\u001b[31mdelayed analyzer failure\nretry"));
       await Promise.resolve();
       await vi.advanceTimersByTimeAsync(500);
-      await Promise.resolve();
-      expect(harness.statuses.get("pi-fluency")).toBe("󰅙 ERR analyze");
+      await vi.waitFor(() => expect(harness.statuses.get("pi-fluency")).toBe("󰅙 ERR analyze"));
       expect(harness.fakePi.eventEmissions.at(-1)).toMatchObject({
         data: { icon: "󰅙", text: "ERR analyze", color: "error" },
       });
@@ -484,7 +485,7 @@ describe("Pi Fluency extension", () => {
     createFluencyExtension(harness.deps)(harness.pi);
     await harness.emitInput("I made an mistake.");
     await harness.emitAgentSettled();
-    expect(harness.analyzer.analyze).toHaveBeenCalledTimes(1);
+    await vi.waitFor(() => expect(harness.analyzer.analyze).toHaveBeenCalledOnce());
 
     vi.useFakeTimers();
     try {
@@ -492,9 +493,8 @@ describe("Pi Fluency extension", () => {
       harness.rejectAnalysis();
       await Promise.resolve();
       await vi.advanceTimersByTimeAsync(500);
-      await Promise.resolve();
+      await vi.waitFor(() => expect(harness.statuses.get("pi-fluency")).toBe("󰅙 ERR model"));
       expect(harness.analyzer.analyze).toHaveBeenCalledTimes(2);
-      expect(harness.statuses.get("pi-fluency")).toBe("󰅙 ERR model");
       expect(harness.notifications.filter((item) => item.type === "error").at(-1)?.message)
         .toBe("Pi Fluency: Configured Pi Fluency model is unavailable");
     } finally {
@@ -770,7 +770,7 @@ describe("Pi Fluency extension", () => {
 
     await harness.emitInput("I made an mistake.");
     await harness.emitAgentSettled();
-    expect(analyze).toHaveBeenCalledOnce();
+    await vi.waitFor(() => expect(analyze).toHaveBeenCalledOnce());
     await vi.waitFor(() => expect(harness.statuses.get("pi-fluency")).toBe("󰅙 ERR auth"));
     expect(harness.fakePi.eventEmissions.at(-1)).toMatchObject({
       data: { icon: "󰅙", text: "ERR auth", color: "error" },
@@ -1243,9 +1243,112 @@ describe("Pi Fluency extension", () => {
     createFluencyExtension({ ...harness.deps, showCoaching })(harness.pi);
 
     expect(await harness.emitInput("I made an mistake while checking is active.")).toEqual({ action: "continue" });
-    expect(harness.abortObserved).toBe(true);
+    expect(harness.abortObserved).toBe(false);
+    expect(harness.analyzer.analyze).not.toHaveBeenCalled();
     expect(harness.editorText).toBe("");
     expect((await FluencyStore.open(harness.deps.rootDir)).getAnalyticsSnapshot().observations).toEqual([]);
+  });
+
+  it("Send unchecked cancels a hung post-wait policy read without exceeding handler deadline", async () => {
+    const harness = await createExtensionHarness({ enabled: true });
+    const store = await FluencyStore.open(harness.deps.rootDir);
+    await store.activatePractice(2, {
+      explanation: oneMistake.mistakes[0]!.explanation,
+      memberPatternKeys: [oneMistake.mistakes[0]!.patternKey],
+    });
+    type PolicyFileReader = (path: string) => Promise<string>;
+    const storeClass = FluencyStore as unknown as { policyFileReader: PolicyFileReader };
+    const originalReader = storeClass.policyFileReader;
+    let reads = 0;
+    storeClass.policyFileReader = (path) => {
+      reads += 1;
+      if (reads > 6) return new Promise<string>(() => undefined);
+      return originalReader(path);
+    };
+    try {
+      createFluencyExtension({
+        ...harness.deps,
+        showCoaching: async () => "send-unchecked",
+      })(harness.pi);
+      const started = Date.now();
+      expect(await harness.emitInput("I made an mistake while policy reread hangs.")).toEqual({ action: "continue" });
+      expect(Date.now() - started).toBeLessThan(1_000);
+      expect(harness.analyzer.analyze).not.toHaveBeenCalled();
+    } finally {
+      storeClass.policyFileReader = originalReader;
+    }
+  });
+
+  it("authoritatively resumes five-hour snooze created through another store", async () => {
+    const harness = await createExtensionHarness({ enabled: true });
+    createFluencyExtension(harness.deps)(harness.pi);
+    const other = await FluencyStore.open(harness.deps.rootDir);
+    await other.activatePractice(2);
+    const revision = other.getPracticeSettings().revision;
+    await other.snoozePracticeForFiveHours(revision, Date.now() + 1_000, 123);
+
+    await harness.runCommand("practice resume");
+
+    expect((await FluencyStore.open(harness.deps.rootDir)).getPracticeSettings().snoozedUntil).toBeUndefined();
+  });
+
+  it("fresh-authorizes image and stream background paths across stores", async () => {
+    const harness = await createExtensionHarness({ enabled: true });
+    createFluencyExtension(harness.deps)(harness.pi);
+    await (await FluencyStore.open(harness.deps.rootDir)).updateSettings({ enabled: false });
+
+    await harness.emitInput("Image prompt must stay local after pause.", "interactive", { images: [{}] });
+    await harness.emitInput("Stream prompt must stay local after pause.", "interactive", { streamingBehavior: "steer" });
+    await harness.emitAgentSettled();
+
+    expect(harness.analyzer.analyze).not.toHaveBeenCalled();
+  });
+
+  it("drops queued and in-flight background work after cross-store pause or clear", async () => {
+    const harness = await createExtensionHarness({ enabled: true });
+    let resolve!: (result: AnalysisResult) => void;
+    harness.analyzer.analyze.mockImplementationOnce(() => new Promise((done) => { resolve = done; }));
+    createFluencyExtension(harness.deps)(harness.pi);
+
+    await harness.emitInput("First background prompt remains fenced.", "interactive", { images: [{}] });
+    await harness.emitInput("Second queued prompt remains fenced.", "interactive", { images: [{}] });
+    const draining = harness.emitAgentSettled();
+    await vi.waitFor(() => expect(harness.analyzer.analyze).toHaveBeenCalledOnce());
+    const other = await FluencyStore.open(harness.deps.rootDir);
+    await other.clear();
+    await other.updateSettings({ enabled: false });
+    resolve(oneMistake);
+    await draining;
+
+    expect(harness.analyzer.analyze).toHaveBeenCalledOnce();
+    expect((await FluencyStore.open(harness.deps.rootDir)).getAnalyticsSnapshot().observations).toEqual([]);
+  });
+
+  it("revalidates withdrawn foreground authorization after coordinator wait", async () => {
+    const harness = await createExtensionHarness({ enabled: true });
+    let resolve!: (result: AnalysisResult) => void;
+    harness.analyzer.analyze.mockImplementationOnce(() => new Promise((done) => { resolve = done; }));
+    const store = await FluencyStore.open(harness.deps.rootDir);
+    await store.activatePractice(2, {
+      explanation: oneMistake.mistakes[0]!.explanation,
+      memberPatternKeys: [oneMistake.mistakes[0]!.patternKey],
+    });
+    const showCoaching = vi.fn(async (_ctx, check) => {
+      expect((await check).kind).toBe("failure");
+      return "technical-failure" as const;
+    });
+    createFluencyExtension({ ...harness.deps, showCoaching })(harness.pi);
+    await harness.emitInput("Background prompt occupies coordinator.", "interactive", { images: [{}] });
+    const draining = harness.emitAgentSettled();
+    await vi.waitFor(() => expect(harness.analyzer.analyze).toHaveBeenCalledOnce());
+    const foreground = harness.emitInput("I made an mistake while waiting for coordinator.");
+    await vi.waitFor(() => expect(showCoaching).toHaveBeenCalledOnce());
+    await (await FluencyStore.open(harness.deps.rootDir)).updateSettings({ enabled: false });
+    resolve(oneMistake);
+
+    expect(await foreground).toEqual({ action: "continue" });
+    await draining;
+    expect(harness.analyzer.analyze).toHaveBeenCalledOnce();
   });
 
   it("rejects unknown command arguments with usage", async () => {

@@ -226,7 +226,7 @@ describe("FluencyWorker", () => {
     expect(onResult).toHaveBeenCalledTimes(2);
   });
 
-  it("rebuilds background analyzer only when fresh result fingerprint changes", async () => {
+  it("uses fresh background analyzer returned for every provider attempt", async () => {
     const first: Analyzer = { analyze: vi.fn().mockResolvedValue(emptyResult) };
     const second: Analyzer = { analyze: vi.fn().mockResolvedValue(emptyResult) };
     let configuration = { fingerprint: "one", analyzer: first };
@@ -245,9 +245,36 @@ describe("FluencyWorker", () => {
     worker.enqueue(prompt("changed"));
     await worker.drain();
 
-    expect(first.analyze).toHaveBeenCalledTimes(2);
-    expect(second.analyze).toHaveBeenCalledOnce();
+    expect(first.analyze).toHaveBeenCalledOnce();
+    expect(second.analyze).toHaveBeenCalledTimes(2);
     expect(getAnalyzerConfiguration).toHaveBeenCalledTimes(3);
+  });
+
+  it("revalidates foreground authorization after coordinator wait before provider call", async () => {
+    const coordinator = new AnalyzerCoordinator();
+    const background = createDeferred<AnalysisResult>();
+    const worker = makeWorker({
+      coordinator,
+      analyzer: { analyze: vi.fn(() => background.promise) },
+    });
+    worker.enqueue(prompt("background"));
+    const draining = worker.drain();
+    const foregroundAnalyzer: Analyzer = { analyze: vi.fn().mockResolvedValue(emptyResult) };
+    const authorize = vi.fn().mockResolvedValue(false);
+    const foreground = worker.analyzeForeground({
+      analyzer: foregroundAnalyzer,
+      prompt: prompt("foreground"),
+      patterns: [],
+      deadline: Date.now() + 1_000,
+      authorize,
+    });
+
+    expect(authorize).not.toHaveBeenCalled();
+    background.resolve(emptyResult);
+    await expect(foreground).resolves.toEqual({ kind: "cancelled" });
+    expect(authorize).toHaveBeenCalledOnce();
+    expect(foregroundAnalyzer.analyze).not.toHaveBeenCalled();
+    await draining;
   });
 
   it("discards an abort-ignoring background result invalidated by a foreground deadline", async () => {

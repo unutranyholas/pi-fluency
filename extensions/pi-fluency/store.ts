@@ -475,40 +475,59 @@ export class FluencyStore {
     }));
   }
 
-  /** Read one stable settings/practice pair without taking the mutation lock. */
+  /** Read one stable authorization/configuration/generation snapshot without taking mutation lock. */
   async getFreshPolicySnapshot(deadline: number): Promise<PracticePolicySnapshot> {
     if (!Number.isFinite(deadline)) throw new Error("Invalid practice policy deadline");
+    const deadlineError = (): Error => new Error("Practice policy read deadline exceeded");
     const readOptional = async (path: string): Promise<string | undefined> => {
-      if (Date.now() >= deadline) throw new Error("Practice policy read deadline exceeded");
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) throw deadlineError();
+      let timer: ReturnType<typeof setTimeout> | undefined;
       try {
-        const value = await FluencyStore.policyFileReader(path);
-        if (Date.now() >= deadline) throw new Error("Practice policy read deadline exceeded");
+        const value = await Promise.race([
+          FluencyStore.policyFileReader(path),
+          new Promise<never>((_resolve, reject) => { timer = setTimeout(() => reject(deadlineError()), remaining); }),
+        ]);
+        if (Date.now() >= deadline) throw deadlineError();
         return value;
       } catch (error) {
-        if (Date.now() >= deadline) throw new Error("Practice policy read deadline exceeded");
+        if (Date.now() >= deadline || (error instanceof Error && error.message === deadlineError().message)) {
+          throw deadlineError();
+        }
         if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
         throw error;
+      } finally {
+        if (timer !== undefined) clearTimeout(timer);
       }
     };
 
     while (Date.now() < deadline) {
       const settingsFirst = await readOptional(this.settingsPath);
       const practiceFirst = await readOptional(this.practicePath);
+      const generationFirst = await readOptional(this.historyGenerationPath);
       const settingsSecond = await readOptional(this.settingsPath);
       const practiceSecond = await readOptional(this.practicePath);
-      if (settingsFirst !== settingsSecond || practiceFirst !== practiceSecond) continue;
+      const generationSecond = await readOptional(this.historyGenerationPath);
+      if (settingsFirst !== settingsSecond || practiceFirst !== practiceSecond || generationFirst !== generationSecond) continue;
 
       let settings = copySettings(DEFAULT_SETTINGS);
       let practice = defaultPracticeSettings();
       try {
         if (settingsSecond !== undefined) settings = decodeSettings(JSON.parse(settingsSecond) as unknown);
-      } catch { /* A corrupt complete file has safe effective defaults. */ }
+      } catch { /* Corrupt complete file has safe effective defaults. */ }
       try {
         if (practiceSecond !== undefined) practice = decodePracticeSettings(JSON.parse(practiceSecond) as unknown);
-      } catch { /* A corrupt complete file has safe effective defaults. */ }
-      return { settings: copySettings(settings), practice: copyPracticeSettings(practice) };
+      } catch { /* Corrupt complete file has safe effective defaults. */ }
+      if (generationSecond === undefined) throw new Error("History generation unavailable");
+      const marker = decodeHistoryGenerationMarker(generationSecond);
+      if (marker.resetPending) throw new Error("History clear in progress");
+      return {
+        settings: copySettings(settings),
+        practice: copyPracticeSettings(practice),
+        historyGeneration: marker.generation,
+      };
     }
-    throw new Error("Practice policy read deadline exceeded");
+    throw deadlineError();
   }
 
   private updatePractice(

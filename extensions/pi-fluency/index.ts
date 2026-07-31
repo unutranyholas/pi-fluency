@@ -29,7 +29,7 @@ import { PracticeSessionSnooze } from "./practice-settings.js";
 import { sanitizeTerminalLabel } from "./sanitize.js";
 import { runSetup } from "./setup.js";
 import { formatStatus, type StatusErrorReason, type StatusState } from "./status.js";
-import { FluencyStore } from "./store.js";
+import { FluencyStore, type AnalysisCommitFence } from "./store.js";
 import type { FluencySettings, PracticeSettings } from "./types.js";
 import { FluencyWorker } from "./worker.js";
 
@@ -60,7 +60,7 @@ export type ShowCoaching = (
 
 export interface ExtensionDependencies {
   rootDir?: string;
-  analyzerFactory?: (ctx: ExtensionContext, store: FluencyStore) => Analyzer;
+  analyzerFactory?: (ctx: ExtensionContext, store: FluencyStore, settings?: FluencySettings) => Analyzer;
   now?: () => number;
   openInbox?: OpenInbox;
   showCoaching?: ShowCoaching;
@@ -85,6 +85,27 @@ function hasConfiguredIdentity(settings: FluencySettings): boolean {
 function hasValidConfiguration(settings: FluencySettings, ctx: ExtensionContext): boolean {
   if (!hasConfiguredIdentity(settings)) return false;
   return ctx.modelRegistry.find(settings.provider!, settings.modelId!) !== undefined;
+}
+
+function fenceFromPolicy(policy: { settings: FluencySettings; historyGeneration: string }): AnalysisCommitFence {
+  const settings = policy.settings;
+  return {
+    historyGeneration: policy.historyGeneration,
+    enabled: settings.enabled,
+    minimumConfidence: settings.minimumConfidence,
+    ...(settings.consentedAt === undefined ? {} : { consentedAt: settings.consentedAt }),
+    ...(settings.provider === undefined ? {} : { provider: settings.provider }),
+    ...(settings.modelId === undefined ? {} : { modelId: settings.modelId }),
+  };
+}
+
+function sameAnalysisFence(left: AnalysisCommitFence, right: AnalysisCommitFence): boolean {
+  return left.historyGeneration === right.historyGeneration
+    && left.enabled === right.enabled
+    && left.consentedAt === right.consentedAt
+    && left.provider === right.provider
+    && left.modelId === right.modelId
+    && left.minimumConfidence === right.minimumConfidence;
 }
 
 function registerHandlers(pi: ExtensionAPI, dependencies: ResolvedDependencies): void {
@@ -210,7 +231,7 @@ function registerHandlers(pi: ExtensionAPI, dependencies: ResolvedDependencies):
     store: FluencyStore,
     settings: FluencySettings = store.getSettings(),
   ): Analyzer => {
-    if (dependencies.analyzerFactory) return dependencies.analyzerFactory(ctx, store);
+    if (dependencies.analyzerFactory) return dependencies.analyzerFactory(ctx, store, settings);
     const model = settings.provider && settings.modelId
       ? ctx.modelRegistry.find(settings.provider, settings.modelId)
       : undefined;
@@ -226,18 +247,24 @@ function registerHandlers(pi: ExtensionAPI, dependencies: ResolvedDependencies):
     ctxRef = ctx;
     workerRef ??= new FluencyWorker({
       analyzer: createAnalyzer(ctx, store),
-      getAnalyzerConfiguration: () => {
-        const settings = store.getSettings();
+      getAnalyzerConfiguration: async (job) => {
+        if (job.fence === undefined) return undefined;
+        const currentCtx = ctxRef ?? ctx;
+        const fresh = await store.getFreshPolicySnapshot(Date.now() + 1_000);
+        const freshFence = fenceFromPolicy(fresh);
+        if (!sameAnalysisFence(job.fence, freshFence) || !hasConfiguredIdentity(fresh.settings)) return undefined;
         return {
-          fingerprint: analyzerResultFingerprint(settings),
-          analyzer: createAnalyzer(ctxRef ?? ctx, store, settings),
+          fingerprint: analyzerResultFingerprint(fresh.settings),
+          analyzer: createAnalyzer(currentCtx, store, fresh.settings),
         };
       },
       isIdle: () => ctxRef?.isIdle() ?? false,
       getPatterns: () => store.listKnownPatterns(),
-      onResult: async (prompt, result) => {
+      onResult: async (prompt, result, fence) => {
+        if (fence === undefined) return;
         try {
-          await store.appendAnalysis(prompt, result);
+          const committed = await store.conditionalAppendAnalysis(fence, prompt, result);
+          if (committed !== "committed") return;
         } catch (error) {
           if (ctxRef) setError(ctxRef, "store", error);
           return;
@@ -371,12 +398,9 @@ function registerHandlers(pi: ExtensionAPI, dependencies: ResolvedDependencies):
       return;
     }
     if (action === "practice resume") {
-      const practice = store.getPracticeSettings();
-      const sessionSnoozed = isSessionPracticeSnoozed(ctx, store);
-      const globalSnoozed = (practice.snoozedUntil ?? 0) > dependencies.now();
-      // Append authoritative session resume first; failure leaves global snooze intact.
-      if (sessionSnoozed) resumeSessionPractice(ctx, store);
-      if (globalSnoozed) await store.resumePractice();
+      // Mutation rereads sidecar under global lock, so stale process cache cannot miss durable snooze.
+      await store.resumePractice();
+      if (isSessionPracticeSnoozed(ctx, store)) resumeSessionPractice(ctx, store);
       ctx.ui.notify("Pi Fluency practice resumed now", "info");
       return;
     }
@@ -498,8 +522,9 @@ function registerHandlers(pi: ExtensionAPI, dependencies: ResolvedDependencies):
         // Original event still owns submission. Only ordinary background collection may follow.
         try {
           const fallbackStore = await getStore();
-          if (!shuttingDown && hasValidConfiguration(fallbackStore.getSettings(), ctx)) {
-            getWorker(ctx, fallbackStore).enqueue(prompt);
+          const fresh = await fallbackStore.getFreshPolicySnapshot(foregroundDeadline);
+          if (!shuttingDown && hasValidConfiguration(fresh.settings, ctx)) {
+            getWorker(ctx, fallbackStore).enqueue(prompt, fenceFromPolicy(fresh));
           }
         } catch { /* Original input remains fail-open. */ }
         return;
@@ -527,14 +552,28 @@ function registerHandlers(pi: ExtensionAPI, dependencies: ResolvedDependencies):
       }
       return;
     }
-    const queueBackground = (): void => {
+    const queueBackground = (policy: { settings: FluencySettings; historyGeneration: string }): void => {
       try {
-        getWorker(ctx, store).enqueue(prompt);
+        getWorker(ctx, store).enqueue(prompt, fenceFromPolicy(policy));
       } catch (error) {
         setError(ctx, analyzerErrorReason(error), error);
       }
     };
-    if (!hasValidConfiguration(store.getSettings(), ctx)) {
+    let initialPolicy;
+    try {
+      initialPolicy = await store.getFreshPolicySnapshot(foregroundDeadline);
+    } catch {
+      if (!idleTextOnly) return;
+      try {
+        ctx.ui.setEditorText("");
+        ctx.ui.notify("Sent without practice check — policy unavailable.", "warning");
+        return { action: "continue" };
+      } catch {
+        ctx.ui.notify("Not sent — editor could not be cleared.", "error");
+        return { action: "handled" };
+      }
+    }
+    if (!hasValidConfiguration(initialPolicy.settings, ctx)) {
       publishConfigurationFailureOrClear(ctx, store);
       if (!idleTextOnly) return;
       try { ctx.ui.setEditorText(""); } catch {
@@ -549,10 +588,11 @@ function registerHandlers(pi: ExtensionAPI, dependencies: ResolvedDependencies):
       return { action: "continue" };
     }
     if (!idleTextOnly) {
-      queueBackground();
+      queueBackground(initialPolicy);
       return;
     }
     let backgroundAllowed = true;
+    let backgroundPolicy = initialPolicy;
     const restoreInputStatus = (): void => {
       if (shuttingDown || !backgroundAllowed) clearStatus(ctx);
       else publishProgress(ctx, store);
@@ -568,19 +608,13 @@ function registerHandlers(pi: ExtensionAPI, dependencies: ResolvedDependencies):
       }
     };
     const failOpen = (message: string): { action: "continue" } | { action: "handled" } => {
-      if (backgroundAllowed) queueBackground();
+      if (backgroundAllowed) queueBackground(backgroundPolicy);
       if (!clearForContinue()) return { action: "handled" };
       ctx.ui.notify(message, "warning");
       restoreInputStatus();
       return { action: "continue" };
     };
 
-    let initialPolicy;
-    try {
-      initialPolicy = await store.getFreshPolicySnapshot(foregroundDeadline);
-    } catch {
-      return failOpen("Sent without practice check — policy unavailable.");
-    }
     const initialSessionSnoozed = isSessionPracticeSnoozed(ctx, store, initialPolicy.practice);
     const hasActiveTarget = resolvePracticeTargets({
       targets: initialPolicy.practice.targets,
@@ -600,11 +634,11 @@ function registerHandlers(pi: ExtensionAPI, dependencies: ResolvedDependencies):
         policy: initialPolicy,
       })) {
       if (!clearForContinue()) return { action: "handled" };
-      if (hasValidConfiguration(initialPolicy.settings, ctx)) queueBackground();
+      if (hasValidConfiguration(initialPolicy.settings, ctx)) queueBackground(initialPolicy);
       return { action: "continue" };
     }
 
-    const commitFence = store.captureAnalysisCommitFence(initialPolicy.settings);
+    const commitFence = fenceFromPolicy(initialPolicy);
     publishStatus(ctx, { kind: "practice-check" });
     const attemptController = new AbortController();
     coachingControllers.add(attemptController);
@@ -624,6 +658,28 @@ function registerHandlers(pi: ExtensionAPI, dependencies: ResolvedDependencies):
           deadline: foregroundDeadline,
           signal: attemptController.signal,
           abortGraceMs: 100,
+          authorize: async () => {
+            const fresh = await store.getFreshPolicySnapshot(foregroundDeadline);
+            const sessionSnoozed = isSessionPracticeSnoozed(ctx, store, fresh.practice);
+            checkPolicy = fresh;
+            checkSessionSnoozed = sessionSnoozed;
+            backgroundPolicy = fresh;
+            return revalidateCoachingPolicy(
+              initialPolicy,
+              fresh,
+              initialSessionSnoozed,
+              sessionSnoozed,
+            ) === "unchanged"
+              && isCoachingEligible({
+                source: event.source,
+                idle: true,
+                textOnly: true,
+                collectionEligible: true,
+                sessionSnoozed,
+                now: dependencies.now(),
+                policy: fresh,
+              });
+          },
         });
         if (outcome.kind !== "success") {
           if (outcome.kind === "quarantined") {
@@ -634,6 +690,7 @@ function registerHandlers(pi: ExtensionAPI, dependencies: ResolvedDependencies):
         successfulResult = outcome.result;
         checkPolicy = await store.getFreshPolicySnapshot(foregroundDeadline);
         checkSessionSnoozed = isSessionPracticeSnoozed(ctx, store, checkPolicy.practice);
+        backgroundPolicy = checkPolicy;
         const revalidation = revalidateCoachingPolicy(
           initialPolicy,
           checkPolicy,
@@ -748,6 +805,7 @@ function registerHandlers(pi: ExtensionAPI, dependencies: ResolvedDependencies):
       try {
         finalPolicy = await store.getFreshPolicySnapshot(Date.now() + 1_000);
         finalSessionSnoozed = isSessionPracticeSnoozed(ctx, store, finalPolicy.practice);
+        backgroundPolicy = finalPolicy;
       } catch { /* Conditional store fence remains authoritative. */ }
       const revalidation = revalidateCoachingPolicy(
         initialPolicy,
@@ -760,7 +818,7 @@ function registerHandlers(pi: ExtensionAPI, dependencies: ResolvedDependencies):
         let tracked!: Promise<void>;
         tracked = store.conditionalAppendAnalysis(commitFence, prompt, successfulResult)
           .then((result) => {
-            if (result === "analyzer-stale" && !shuttingDown) queueBackground();
+            if (result === "analyzer-stale" && !shuttingDown) queueBackground(backgroundPolicy);
             else if (result === "committed" && !shuttingDown) publishProgress(ctx, store);
           })
           .catch((error) => {
@@ -769,10 +827,10 @@ function registerHandlers(pi: ExtensionAPI, dependencies: ResolvedDependencies):
           .finally(() => scheduledCommits.delete(tracked));
         scheduledCommits.add(tracked);
       } else if (reuse === "queue-background" || analyzerChangeObserved) {
-        queueBackground();
+        queueBackground(backgroundPolicy);
       }
     } else {
-      queueBackground();
+      queueBackground(backgroundPolicy);
     }
     restoreInputStatus();
     return { action: "continue" };

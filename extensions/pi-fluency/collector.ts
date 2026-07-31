@@ -87,9 +87,10 @@ function stripInlineCode(text: string): string {
 }
 
 export function collectPrompt(text: string, observedAt = Date.now()): CollectedPrompt | undefined {
-  if (text.trimStart().startsWith("/")) return undefined;
+  const sanitized = sanitizeCollectedInput(text);
+  if (sanitized.trimStart().startsWith("/")) return undefined;
 
-  let prose = stripInlineCode(stripBlockCode(sanitizeCollectedInput(text)));
+  let prose = stripInlineCode(stripBlockCode(sanitized));
   for (const pattern of SECRET_PATTERNS) prose = prose.replace(pattern, "[REDACTED]");
   prose = prose.replace(/\s+/g, " ").trim();
   if (prose.length < 8 || (prose.match(/\p{L}/gu)?.length ?? 0) < 3) return undefined;

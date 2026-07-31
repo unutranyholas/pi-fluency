@@ -1,3 +1,4 @@
+import { visibleWidth } from "@earendil-works/pi-tui";
 import { describe, expect, it, vi } from "vitest";
 import { CoachingOverlay, showCoachingOverlay } from "../extensions/pi-fluency/coaching-overlay.js";
 import type { AnalyzerMistake, PracticeTarget } from "../extensions/pi-fluency/types.js";
@@ -72,6 +73,25 @@ describe("CoachingOverlay", () => {
     overlay.handleInput("down");
     overlay.handleInput("enter");
     expect(finish).toHaveBeenCalledWith("send-once");
+  });
+
+  it("orders exact-explanation matches with their selected target and stays within narrow widths", () => {
+    const overlay = new CoachingOverlay({
+      tui: { requestRender: vi.fn(), terminal: { rows: 100 } },
+      keybindings,
+      finish: vi.fn(),
+    });
+    overlay.setMatches([
+      mistake("new-key", "exact-second"),
+      mistake("first", "key-first"),
+    ].map((item, index) => index === 0 ? { ...item, explanation: "Second selected" } : item), [
+      { explanation: "First selected", memberPatternKeys: ["first"] },
+      { explanation: "Second selected", memberPatternKeys: ["old-key"] },
+    ]);
+
+    const rendered = plain(overlay.render(32));
+    expect(rendered.indexOf("Rule: First selected")).toBeLessThan(rendered.indexOf("Rule: Second selected"));
+    expect(overlay.render(32).every((line) => visibleWidth(line) <= 32)).toBe(true);
   });
 
   it("paginates matches within one rule and pins actions at short height", () => {

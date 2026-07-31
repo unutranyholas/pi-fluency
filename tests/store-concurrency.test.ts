@@ -218,6 +218,25 @@ describe("FluencyStore concurrency", () => {
     }
   });
 
+  it("bounds a hung policy file read by the supplied deadline", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(1_000);
+    const store = await FluencyStore.open(root);
+    type PolicyFileReader = (path: string) => Promise<string>;
+    const storeClass = FluencyStore as unknown as { policyFileReader: PolicyFileReader };
+    const originalReader = storeClass.policyFileReader;
+    storeClass.policyFileReader = () => new Promise<string>(() => undefined);
+    try {
+      const assertion = expect(store.getFreshPolicySnapshot(Date.now() + 50))
+        .rejects.toThrow("Practice policy read deadline exceeded");
+      await vi.advanceTimersByTimeAsync(50);
+      await assertion;
+    } finally {
+      storeClass.policyFileReader = originalReader;
+      vi.useRealTimers();
+    }
+  });
+
   it("rejects a policy snapshot when the final missing-file read crosses its deadline", async () => {
     const store = await FluencyStore.open(root);
     type PolicyFileReader = (path: string) => Promise<string>;
@@ -230,15 +249,16 @@ describe("FluencyStore concurrency", () => {
     storeClass.policyFileReader = async (path) => {
       reads += 1;
       if (path.endsWith("practice.json")) {
-        if (reads === 4) now = 20;
+        if (reads === 5) now = 20;
         throw Object.assign(new Error("missing"), { code: "ENOENT" });
       }
+      if (path.endsWith("history-generation")) return originalReader(path);
       return settings;
     };
 
     try {
       await expect(store.getFreshPolicySnapshot(20)).rejects.toThrow("Practice policy read deadline exceeded");
-      expect(reads).toBe(4);
+      expect(reads).toBe(5);
     } finally {
       storeClass.policyFileReader = originalReader;
       nowSpy.mockRestore();

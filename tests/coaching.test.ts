@@ -34,7 +34,7 @@ const practice: PracticeSettings = {
   consentedAt: 2,
   targets: [{ explanation: "Use articles", memberPatternKeys: ["grammar.article.rule"] }],
 };
-const policy: PracticePolicySnapshot = { settings, practice };
+const policy: PracticePolicySnapshot = { settings, practice, historyGeneration: "generation" };
 const mistake = (patternKey: string, explanation: string): AnalysisResult["mistakes"][number] => ({
   original: "an agent",
   correction: "a agent",
@@ -71,9 +71,9 @@ describe("coaching policy", () => {
     expect(isCoachingEligible({ ...eligible, source: "rpc" })).toBe(false);
     expect(isCoachingEligible({ ...eligible, textOnly: false })).toBe(false);
     expect(isCoachingEligible({ ...eligible, sessionSnoozed: true })).toBe(false);
-    expect(isCoachingEligible({ ...eligible, policy: { settings, practice: { ...practice, snoozedUntil: 101 } } })).toBe(false);
+    expect(isCoachingEligible({ ...eligible, policy: { settings, practice: { ...practice, snoozedUntil: 101 }, historyGeneration: "generation" } })).toBe(false);
     const { consentedAt: _consent, ...practiceWithoutConsent } = practice;
-    expect(isCoachingEligible({ ...eligible, policy: { settings, practice: practiceWithoutConsent } })).toBe(false);
+    expect(isCoachingEligible({ ...eligible, policy: { settings, practice: practiceWithoutConsent, historyGeneration: "generation" } })).toBe(false);
   });
 
   it("gates selected non-ignored mistakes while preserving complete result for reuse", () => {
@@ -98,9 +98,9 @@ describe("coaching policy", () => {
   });
 
   it("uses separate analyzer and gate fingerprints with change-specific revalidation", () => {
-    const gateChanged = { settings, practice: { ...practice, enabled: false } };
-    const analyzerChanged = { settings: { ...settings, minimumConfidence: 0.9 }, practice };
-    const disabled = { settings: { ...settings, enabled: false }, practice };
+    const gateChanged = { ...policy, practice: { ...practice, enabled: false } };
+    const analyzerChanged = { ...policy, settings: { ...settings, minimumConfidence: 0.9 } };
+    const disabled = { ...policy, settings: { ...settings, enabled: false } };
 
     expect(analyzerResultFingerprint(settings)).toBe(analyzerResultFingerprint({
       ...settings,
@@ -112,11 +112,11 @@ describe("coaching policy", () => {
     expect(revalidateCoachingPolicy(policy, analyzerChanged)).toBe("analyzer-changed");
     expect(revalidateCoachingPolicy(policy, disabled)).toBe("analytics-disabled");
     expect(revalidateCoachingPolicy(policy, {
+      ...policy,
       settings: { ...settings, ignoredPatternKeys: ["grammar.article.rule"] },
-      practice,
     })).toBe("gate-changed");
     expect(revalidateCoachingPolicy(policy, {
-      settings,
+      ...policy,
       practice: { ...practice, snoozedUntil: 500 },
     })).toBe("gate-changed");
   });

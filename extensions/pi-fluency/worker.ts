@@ -1,4 +1,5 @@
 import { AnalyzerConfigurationError, type Analyzer } from "./analyzer.js";
+import type { AnalysisCommitFence } from "./store.js";
 import type { AnalysisResult, CollectedPrompt, MistakePattern, PracticeTarget } from "./types.js";
 
 export interface WorkerSnapshot {
@@ -52,6 +53,8 @@ export interface ForegroundAnalysisOptions {
   deadline: number;
   signal?: AbortSignal;
   abortGraceMs?: number;
+  /** Runs after coordinator wait, immediately before provider call. */
+  authorize?: () => Promise<boolean>;
 }
 
 export class AnalyzerCoordinatorUnavailableError extends Error {
@@ -246,6 +249,32 @@ export class AnalyzerCoordinator {
       if (this.quarantined) return { kind: "quarantined" };
       if (options.signal?.aborted) return { kind: "cancelled" };
       if (Date.now() >= options.deadline) return { kind: "timeout" };
+      if (options.authorize !== undefined) {
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        let onAbort: (() => void) | undefined;
+        try {
+          const remaining = Math.max(0, options.deadline - Date.now());
+          const deadline = new Promise<"deadline">((resolve) => { timer = setTimeout(() => resolve("deadline"), remaining); });
+          const cancelled = options.signal === undefined
+            ? new Promise<never>(() => undefined)
+            : new Promise<"cancel">((resolve) => {
+              onAbort = () => resolve("cancel");
+              options.signal!.addEventListener("abort", onAbort, { once: true });
+              if (options.signal!.aborted) onAbort();
+            });
+          const authorized = await Promise.race([options.authorize(), deadline, cancelled]);
+          if (authorized === "deadline") return { kind: "timeout" };
+          if (authorized === "cancel") return { kind: "cancelled" };
+          if (!authorized) return { kind: "cancelled" };
+        } catch (error) {
+          return { kind: "error", error: normalizeError(error) };
+        } finally {
+          if (timer !== undefined) clearTimeout(timer);
+          if (onAbort !== undefined) options.signal!.removeEventListener("abort", onAbort);
+        }
+      }
+      if (!this.isCurrentOwner(options.owner)) return { kind: "shutdown" };
+      if (Date.now() >= options.deadline) return { kind: "timeout" };
 
       const active = this.start(options.owner, (signal) => options.analyzer.analyze(
         options.prompt,
@@ -328,13 +357,18 @@ export interface WorkerAnalyzerConfiguration {
   analyzer: Analyzer;
 }
 
+export interface BackgroundAnalysisJob {
+  prompt: CollectedPrompt;
+  fence?: AnalysisCommitFence;
+}
+
 export interface WorkerOptions {
   analyzer: Analyzer;
-  /** Fresh request-scoped resolver. Worker replaces cached analyzer only when fingerprint changes. */
-  getAnalyzerConfiguration?: () => WorkerAnalyzerConfiguration;
+  /** Fresh request-scoped authorization/configuration resolver. Undefined discards stale job. */
+  getAnalyzerConfiguration?: (job: BackgroundAnalysisJob) => WorkerAnalyzerConfiguration | undefined | Promise<WorkerAnalyzerConfiguration | undefined>;
   isIdle: () => boolean;
   getPatterns: () => MistakePattern[];
-  onResult: (prompt: CollectedPrompt, result: AnalysisResult) => Promise<void>;
+  onResult: (prompt: CollectedPrompt, result: AnalysisResult, fence?: AnalysisCommitFence) => Promise<void>;
   onError: (error: Error) => void;
   onOverflow: (dropped: number) => void;
   maxQueue?: number;
@@ -360,7 +394,7 @@ function abortableDelay(delayMs: number, signal: AbortSignal): Promise<void> {
 }
 
 export class FluencyWorker {
-  private readonly queue: CollectedPrompt[] = [];
+  private readonly queue: BackgroundAnalysisJob[] = [];
   private readonly maxQueue: number;
   private readonly coordinator: AnalyzerCoordinator;
   private readonly owner: AnalyzerCoordinatorOwner;
@@ -379,9 +413,9 @@ export class FluencyWorker {
     this.analyzerConfiguration = { fingerprint: "legacy-static-analyzer", analyzer: options.analyzer };
   }
 
-  enqueue(prompt: CollectedPrompt): void {
+  enqueue(prompt: CollectedPrompt, fence?: AnalysisCommitFence): void {
     if (this.shuttingDown || !this.coordinator.canAcceptBackground(this.owner)) return;
-    this.queue.push(prompt);
+    this.queue.push({ prompt, ...(fence === undefined ? {} : { fence: { ...fence } }) });
     while (this.queue.length > this.maxQueue) {
       this.queue.shift();
       this.dropped += 1;
@@ -420,11 +454,11 @@ export class FluencyWorker {
 
   private async run(): Promise<void> {
     while (!this.shuttingDown && this.options.isIdle()) {
-      const prompt = this.queue.shift();
-      if (!prompt) return;
+      const job = this.queue.shift();
+      if (!job) return;
       try {
-        const result = await this.analyzeWithRetry(prompt);
-        if (!this.shuttingDown) await this.options.onResult(prompt, result);
+        const result = await this.analyzeWithRetry(job);
+        if (result !== undefined && !this.shuttingDown) await this.options.onResult(job.prompt, result, job.fence);
       } catch (error) {
         if (!this.shuttingDown) {
           const normalized = normalizeError(error);
@@ -434,7 +468,7 @@ export class FluencyWorker {
             return;
           }
           if (normalized instanceof AnalyzerConfigurationError) {
-            this.queue.unshift(prompt);
+            this.queue.unshift(job);
             this.options.onError(normalized);
             return;
           }
@@ -447,7 +481,7 @@ export class FluencyWorker {
     }
   }
 
-  private async analyzeWithRetry(prompt: CollectedPrompt): Promise<AnalysisResult> {
+  private async analyzeWithRetry(job: BackgroundAnalysisJob): Promise<AnalysisResult | undefined> {
     let lastError: Error | undefined;
     for (const delayMs of [0, RETRY_DELAY_MS]) {
       if (this.shuttingDown) throw new DOMException("Aborted", "AbortError");
@@ -457,12 +491,17 @@ export class FluencyWorker {
 
       const timeoutSignal = AbortSignal.timeout(ANALYSIS_TIMEOUT_MS);
       try {
-        const fresh = this.options.getAnalyzerConfiguration?.();
-        if (fresh !== undefined && fresh.fingerprint !== this.analyzerConfiguration.fingerprint) {
-          this.analyzerConfiguration = fresh;
+        const configured = this.options.getAnalyzerConfiguration?.(job);
+        let fresh: WorkerAnalyzerConfiguration | undefined;
+        if (configured !== undefined && typeof (configured as Promise<WorkerAnalyzerConfiguration | undefined>).then === "function") {
+          fresh = await (configured as Promise<WorkerAnalyzerConfiguration | undefined>);
+        } else {
+          fresh = configured as WorkerAnalyzerConfiguration | undefined;
         }
+        if (this.options.getAnalyzerConfiguration !== undefined && fresh === undefined) return undefined;
+        if (fresh !== undefined) this.analyzerConfiguration = fresh;
         return await this.coordinator.runBackground(this.owner, (coordinatorSignal) => this.analyzerConfiguration.analyzer.analyze(
-          prompt,
+          job.prompt,
           this.options.getPatterns(),
           AbortSignal.any([this.controller!.signal, timeoutSignal, coordinatorSignal]),
         ));

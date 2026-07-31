@@ -11,7 +11,7 @@ describe("collectPrompt", () => {
     expect(result?.promptHash).toMatch(/^[a-f0-9]{64}$/);
   });
 
-  it.each(["/fluency", "   ", "```ts\nconst x = 1\n```", "ok"])(
+  it.each(["/fluency", "\u001b[31m/fluency practice reset private-target", "   ", "```ts\nconst x = 1\n```", "ok"])(
     "skips ineligible input %j",
     (text) => expect(collectPrompt(text, 123)).toBeUndefined(),
   );

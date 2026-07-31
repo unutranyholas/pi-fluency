@@ -115,13 +115,19 @@ export class CoachingOverlay implements Component {
   }
 
   private mistakeGroups(): Array<{ label: string; mistakes: AnalyzerMistake[] }> {
-    const groups = this.targets.map((target) => ({
-      label: target.explanation,
-      mistakes: this.mistakes.filter((mistake) => target.memberPatternKeys.includes(mistake.patternKey)),
-    })).filter((group) => group.mistakes.length > 0);
-    const selectedKeys = new Set(this.targets.flatMap((target) => target.memberPatternKeys));
-    for (const mistake of this.mistakes) {
-      if (!selectedKeys.has(mistake.patternKey)) groups.push({ label: mistake.explanation, mistakes: [mistake] });
+    const assigned = new Set<number>();
+    const groups = this.targets.map((target) => {
+      const mistakes = this.mistakes.filter((mistake, index) => {
+        if (assigned.has(index)) return false;
+        const matches = target.memberPatternKeys.includes(mistake.patternKey)
+          || target.explanation === mistake.explanation;
+        if (matches) assigned.add(index);
+        return matches;
+      });
+      return { label: target.explanation, mistakes };
+    }).filter((group) => group.mistakes.length > 0);
+    for (const [index, mistake] of this.mistakes.entries()) {
+      if (!assigned.has(index)) groups.push({ label: mistake.explanation, mistakes: [mistake] });
     }
     return groups;
   }
@@ -132,7 +138,7 @@ export class CoachingOverlay implements Component {
   }
 
   render(width: number): string[] {
-    const contentWidth = Math.max(40, Math.min(width - 2, 88));
+    const contentWidth = Math.max(1, Math.min(width - 2, 88));
     const border = (text: string): string => this.options.theme?.fg("border", text) ?? text;
     const lines: string[] = [];
     if (this.mode === "checking") {
