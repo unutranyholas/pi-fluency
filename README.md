@@ -67,13 +67,13 @@ Useful commands:
 
 Practice is an optional analytical aid, not comprehensive grammar checking, automatic correction, or English instruction. Stats shows recurring rules as inline `[ ]` or `[x]` rows. First rule starts focused; use Up/Down or `j`/`k` to move focus and keep focused row in view, then press Space to toggle it. First Space records preflight consent, enables practice, and selects focused rule atomically; no separate consent prompt opens. This consent means eligible sanitized prompt prose may reach configured Fluency model before main request proceeds, including a draft you later keep instead of sending.
 
-For idle, text-only interactive prompts, Pi Fluency checks selected rules at submit time. This sends full sanitized prose from eligible prompt to analysis provider and can add provider latency, bounded to one attempt with a maximum 12-second cap. Successful checks proceed immediately, and pressing `s` while checking bypasses the check. Editor keeps exact text Pi Fluency received while check runs. Clean result proceeds normally. Match opens checkpoint without rewriting text:
+For idle, text-only interactive prompts, Pi Fluency checks selected rules at submit time. This sends full sanitized prose from eligible prompt to analysis provider and can add provider latency, bounded to one attempt with a maximum 30-second cap. Successful checks proceed immediately, and pressing Enter while checking bypasses the check. Editor keeps exact text Pi Fluency received while check runs. Clean result proceeds normally. Match opens checkpoint without rewriting text:
 
 - **Edit** or **Esc** blocks submission and leaves received text in editor.
-- **Send once** proceeds once and keeps practice active for later prompts.
+- **Send once** starts focused; press Enter to proceed once and keep practice active for later prompts.
 - **Snooze session** proceeds once and bypasses checks for current conversation session, including reload or resume of same session file.
 - **Snooze 5 hours** proceeds once and bypasses checks across Pi sessions until deadline.
-- While checking, **Send unchecked** cancels bounded check and proceeds; **Esc** returns to Edit.
+- While checking, Enter selects **Send unchecked**, cancels bounded check, and proceeds; **Esc** returns to Edit.
 
 Use `/fluency practice resume` to end either snooze. Technical errors, busy or timed-out analysis fail open and attempt to send unchecked. If editor cannot be cleared safely, Pi Fluency does not send and leaves draft visible. Adapter that ignores cancellation is quarantined process-locally: later prompts send unchecked without growing analysis queue until call settles or Pi process restarts.
 

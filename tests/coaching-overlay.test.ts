@@ -1,4 +1,4 @@
-import { visibleWidth } from "@earendil-works/pi-tui";
+import { Key, visibleWidth } from "@earendil-works/pi-tui";
 import { describe, expect, it, vi } from "vitest";
 import { CoachingOverlay, showCoachingOverlay } from "../extensions/pi-fluency/coaching-overlay.js";
 import type { AnalyzerMistake, PracticeTarget } from "../extensions/pi-fluency/types.js";
@@ -31,16 +31,62 @@ function plain(lines: string[]): string {
 }
 
 describe("CoachingOverlay", () => {
-  it("starts on Edit and exposes checking escape hatches", () => {
+  it("uses Enter to send unchecked while checking and leaves s inert", () => {
     const finish = vi.fn();
     const overlay = new CoachingOverlay({
       tui: { requestRender: vi.fn(), terminal: { rows: 30 } },
       keybindings,
       finish,
     });
-    expect(plain(overlay.render(80))).toContain("Checking selected fluency rules…");
+    const rendered = plain(overlay.render(80));
+    expect(rendered).toContain("Checking selected fluency rules…");
+    expect(rendered).toContain("Enter Send unchecked   esc Edit");
+
     overlay.handleInput("s");
+    expect(finish).not.toHaveBeenCalled();
+    overlay.handleInput(Key.enter);
     expect(finish).toHaveBeenCalledWith("send-unchecked");
+    finish.mockClear();
+    overlay.handleInput("enter");
+    expect(finish).toHaveBeenCalledWith("send-unchecked");
+  });
+
+  it("initially focuses Send once, confirms with Enter, and preserves Edit and snooze navigation", () => {
+    const finish = vi.fn();
+    const overlay = new CoachingOverlay({
+      tui: { requestRender: vi.fn(), terminal: { rows: 30 } },
+      keybindings,
+      finish,
+    });
+    overlay.setMatches([mistake("first", "one")], [{ explanation: "Rule", memberPatternKeys: ["first"] }]);
+    const rendered = plain(overlay.render(80));
+    expect(rendered).toContain("› Send once");
+    expect(rendered).toContain("Enter confirm   esc Edit");
+
+    overlay.handleInput("s");
+    expect(finish).not.toHaveBeenCalled();
+    overlay.handleInput(Key.enter);
+    expect(finish).toHaveBeenCalledWith("send-once");
+
+    finish.mockClear();
+    overlay.handleInput("up");
+    overlay.handleInput(Key.enter);
+    expect(finish).toHaveBeenCalledWith("edit");
+
+    finish.mockClear();
+    overlay.handleInput("down");
+    overlay.handleInput("down");
+    overlay.handleInput(Key.enter);
+    expect(finish).toHaveBeenCalledWith("snooze-session");
+
+    finish.mockClear();
+    overlay.handleInput("down");
+    overlay.handleInput(Key.enter);
+    expect(finish).toHaveBeenCalledWith("snooze-five-hours");
+
+    finish.mockClear();
+    overlay.handleInput(Key.escape);
+    expect(finish).toHaveBeenCalledWith("edit");
   });
 
   it("renders bounded, ordered explicit details and keyboard actions", () => {
@@ -68,11 +114,11 @@ describe("CoachingOverlay", () => {
     expect(rendered).toContain("Original:");
     expect(rendered).toContain("Suggestion:");
     expect(rendered).toContain("Why:");
-    expect(rendered).toContain("› Edit");
+    expect(rendered).toContain("› Send once");
 
     overlay.handleInput("down");
     overlay.handleInput("enter");
-    expect(finish).toHaveBeenCalledWith("send-once");
+    expect(finish).toHaveBeenCalledWith("snooze-session");
   });
 
   it("orders exact-explanation matches with their selected target and stays within narrow widths", () => {
@@ -111,8 +157,8 @@ describe("CoachingOverlay", () => {
     expect(first).toContain("5 matches · +4 more");
     expect(first).toContain("Original: Original match-1");
     expect(first).toContain("Why: Why match-1");
-    expect(first).toContain("› Edit");
-    expect(first).toContain("5 Snooze 5 hours");
+    expect(first).toContain("› Send once");
+    expect(first).toContain("Snooze 5 hours");
 
     overlay.handleInput("page-down");
     const second = plain(overlay.render(80));

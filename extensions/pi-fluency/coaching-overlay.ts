@@ -47,7 +47,7 @@ export class CoachingOverlay implements Component {
   private mode: Mode = "checking";
   private mistakes: AnalyzerMistake[] = [];
   private targets: PracticeTarget[] = [];
-  private selectedAction = 0;
+  private selectedAction = 1;
   private detailOffset = 0;
   private visibleDetailCount = 1;
   private disposed = false;
@@ -80,15 +80,16 @@ export class CoachingOverlay implements Component {
     const cancel = data === Key.escape || this.matches(data, "tui.select.cancel");
     if (this.mode === "checking") {
       if (cancel) this.options.finish("edit");
-      else if (data.toLowerCase() === "s") this.options.finish("send-unchecked");
+      else if (data === Key.enter || this.matches(data, "tui.select.confirm")) {
+        this.options.finish("send-unchecked");
+      }
       return;
     }
     if (cancel || data.toLowerCase() === "e") {
       this.options.finish("edit");
       return;
     }
-    if (data.toLowerCase() === "s") this.options.finish("send-once");
-    else if (data.toLowerCase() === "t") this.beginSnooze("snooze-session");
+    if (data.toLowerCase() === "t") this.beginSnooze("snooze-session");
     else if (data === "5") this.beginSnooze("snooze-five-hours");
     else if (data === "j" || this.matches(data, "tui.select.down")) {
       this.selectedAction = Math.min(ACTIONS.length - 1, this.selectedAction + 1);
@@ -142,13 +143,13 @@ export class CoachingOverlay implements Component {
     const border = (text: string): string => this.options.theme?.fg("border", text) ?? text;
     const lines: string[] = [];
     if (this.mode === "checking") {
-      lines.push(" Checking selected fluency rules…", "", " s Send unchecked   esc Edit");
+      lines.push(" Checking selected fluency rules…", "", " Enter Send unchecked   esc Edit");
     } else {
       const details = this.orderedDetails();
       const actionLines = this.mode === "saving"
         ? [" Saving snooze…"]
         : [...ACTIONS.map((action, index) => ` ${index === this.selectedAction ? "›" : " "} ${action}`),
-          " e Edit  s Send once  t Snooze session  5 Snooze 5 hours  esc Edit"];
+          " Enter confirm   esc Edit"];
       // Border, heading, action separator, and actions stay visible even on short terminals.
       const detailBudget = Math.max(3, this.options.tui.terminal.rows - actionLines.length - 5);
       const detailLines: string[] = [];

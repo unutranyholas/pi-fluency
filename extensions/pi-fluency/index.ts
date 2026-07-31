@@ -36,13 +36,13 @@ import { FluencyWorker, type ForegroundAnalysisOutcome } from "./worker.js";
 const STATUS_KEY = "pi-fluency";
 const USAGE = "Usage: /fluency [pause|resume|status|model|clear|stats|practice [on|off|resume|reset]]";
 const PRACTICE_DISCLOSURE = "Before main submission, full sanitized draft goes to configured Fluency model and may be analyzed even if you later choose not to send it.";
-const PRACTICE_CHECK_TIMEOUT_MS = 12_000;
+const PRACTICE_CHECK_TIMEOUT_MS = 30_000;
 const PRACTICE_CHECK_ABORT_GRACE_MS = 100;
 
 function practiceFailureMessage(kind: Exclude<ForegroundAnalysisOutcome["kind"], "success">): string {
   switch (kind) {
-    case "busy": return "Sent without practice check — analyzer was busy for 12 seconds.";
-    case "timeout": return "Sent without practice check — analyzer timed out after 12 seconds.";
+    case "busy": return "Sent without practice check — analyzer was busy for 30 seconds.";
+    case "timeout": return "Sent without practice check — analyzer timed out after 30 seconds.";
     case "error": return "Sent without practice check — analyzer failed.";
     case "shutdown": return "Sent without practice check — analyzer stopped during reload or shutdown.";
     case "quarantined": return "Sent without practice check — analyzer unavailable; restart Pi to restore practice.";
