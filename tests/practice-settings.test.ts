@@ -96,6 +96,30 @@ describe("FluencyStore practice sidecar", () => {
     expect((await stat(join(root, "practice.json"))).mode & 0o777).toBe(0o600);
   });
 
+  it("atomically activates consent, optional first target, and enabled state", async () => {
+    const store = await FluencyStore.open(root);
+    type FileReplacer = (temporary: string, destination: string) => Promise<void>;
+    const storeClass = FluencyStore as unknown as { practiceFileReplacer: FileReplacer };
+    const originalReplacer = storeClass.practiceFileReplacer;
+    storeClass.practiceFileReplacer = async () => { throw new Error("Injected activation failure"); };
+    try {
+      await expect(store.activatePractice(123, target("Use articles", "det.article")))
+        .rejects.toThrow("Injected activation failure");
+      expect(store.getPracticeSettings()).toEqual(DEFAULT_PRACTICE_SETTINGS);
+    } finally {
+      storeClass.practiceFileReplacer = originalReplacer;
+    }
+
+    await store.activatePractice(123, target("Use articles", "det.article"));
+    expect(store.getPracticeSettings()).toEqual({
+      ...DEFAULT_PRACTICE_SETTINGS,
+      revision: 1,
+      enabled: true,
+      consentedAt: 123,
+      targets: [target("Use articles", "det.article")],
+    });
+  });
+
   it("writes private temporary files and updates projection only after atomic replacement", async () => {
     const store = await FluencyStore.open(root);
     await store.setPracticeEnabled(true);

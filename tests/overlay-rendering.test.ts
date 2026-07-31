@@ -136,6 +136,39 @@ describe("FluencyOverlay rendering", () => {
     }
   });
 
+  it("keeps picker and confirmation actions discoverable at compact 24x15", async () => {
+    const stats = {
+      ...emptyStats,
+      rules: [{
+        patternId: "hidden",
+        rowKey: "hidden-row",
+        explanation: "Use articles consistently.",
+        memberPatternKeys: ["hidden.key"],
+        accepted: 2,
+        ratePerThousand: 20,
+        sparkline: "▁▁▁▁▁▁▁",
+        trend: "stable" as const,
+      }],
+      trendCounts: { improving: 0, worsening: 0, stable: 1, new: 0 },
+    };
+    const fixture = makeOverlay({ initialView: "practice", rows: 15, stats });
+    let rendered = fixture.overlay.render(24);
+    let text = plain(rendered).join("\n");
+    expect(rendered.every((line) => visibleWidth(line) === 24)).toBe(true);
+    expect(text).toContain("Space toggle");
+    expect(text).toContain("x practice on/off");
+    expect(text).toContain("c reset practice");
+    expect(text).toContain("Esc back to Stats");
+
+    await fixture.overlay.handleInput(" ");
+    rendered = fixture.overlay.render(24);
+    text = plain(rendered).join("\n");
+    expect(rendered.every((line) => visibleWidth(line) === 24)).toBe(true);
+    expect(text).toContain("> Cancel · Confirm");
+    expect(text).toContain("←→/Tab choose");
+    expect(text).toContain("Enter activate · Esc");
+  });
+
   it("renders a complete aligned themed border at supported widths", () => {
     const { overlay } = makeOverlay();
     for (const width of [30, 56, 80]) {

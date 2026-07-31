@@ -135,11 +135,11 @@ export function makeOverlay(options: {
         else ignoredCategories.delete(target.value);
       }
     },
-    recordPracticeConsent: (target) => {
+    activatePractice: (target) => {
       actions.push(`practice-consent:${target?.explanation ?? "master"}`);
       practice.settings = {
         ...practice.settings,
-        revision: practice.settings.revision + (target ? 3 : 2),
+        revision: practice.settings.revision + 1,
         consentedAt: practice.now,
         enabled: true,
         targets: target ? [target] : [],

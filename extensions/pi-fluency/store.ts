@@ -505,6 +505,36 @@ export class FluencyStore {
     }));
   }
 
+  /** Atomically records first-use consent, optional first target, and enabled state. */
+  activatePractice(consentedAt: number, firstTarget?: PracticeTarget): Promise<void> {
+    if (!Number.isFinite(consentedAt) || consentedAt < 0) {
+      return Promise.reject(new Error("Invalid practice consent"));
+    }
+    let canonicalTarget: PracticeTarget | undefined;
+    try {
+      canonicalTarget = firstTarget === undefined
+        ? undefined
+        : canonicalizePracticeTargets([firstTarget])[0]!;
+    } catch (error) {
+      return Promise.reject(error);
+    }
+    return this.updatePractice((practice) => {
+      const remaining = canonicalTarget === undefined
+        ? practice.targets
+        : practice.targets.filter((item) => item.explanation !== canonicalTarget.explanation);
+      const targets = canonicalTarget === undefined
+        ? remaining
+        : canonicalizePracticeTargets([...remaining, canonicalTarget]);
+      return {
+        ...practice,
+        revision: practice.revision + 1,
+        consentedAt,
+        enabled: true,
+        targets,
+      };
+    });
+  }
+
   setPracticeEnabled(enabled: boolean): Promise<void> {
     return this.updatePractice((practice) => ({
       ...practice,

@@ -323,9 +323,10 @@ function registerHandlers(pi: ExtensionAPI, dependencies: ResolvedDependencies):
           ctx.ui.notify("Pi Fluency practice unchanged", "info");
           return;
         }
-        await store.recordPracticeConsent(dependencies.now());
+        await store.activatePractice(dependencies.now());
+      } else {
+        await store.setPracticeEnabled(true);
       }
-      await store.setPracticeEnabled(true);
       ctx.ui.notify("Pi Fluency practice enabled", "info");
       return;
     }
@@ -335,8 +336,12 @@ function registerHandlers(pi: ExtensionAPI, dependencies: ResolvedDependencies):
       return;
     }
     if (action === "practice resume") {
-      await store.resumePractice();
-      resumeSessionPractice(ctx, store);
+      const practice = store.getPracticeSettings();
+      const sessionSnoozed = isSessionPracticeSnoozed(ctx, store);
+      const globalSnoozed = (practice.snoozedUntil ?? 0) > dependencies.now();
+      // Append authoritative session resume first; failure leaves global snooze intact.
+      if (sessionSnoozed) resumeSessionPractice(ctx, store);
+      if (globalSnoozed) await store.resumePractice();
       ctx.ui.notify("Pi Fluency practice resumed now", "info");
       return;
     }

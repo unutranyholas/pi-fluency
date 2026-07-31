@@ -63,7 +63,7 @@ export interface FluencyOverlayOptions {
   ignorePattern(patternKey: string, pattern: ReviewPattern): MaybePromise;
   ignoreCategory(category: ErrantCategory, pattern: ReviewPattern): MaybePromise;
   restoreIgnored(targets: IgnoreTarget[], pattern: ReviewPattern): MaybePromise;
-  recordPracticeConsent?(target?: PracticeTarget): MaybePromise;
+  activatePractice?(target?: PracticeTarget): MaybePromise;
   setPracticeTarget?(target: PracticeTarget, selected: boolean): MaybePromise;
   setPracticeEnabled?(enabled: boolean): MaybePromise;
   resumePractice?(): MaybePromise;
@@ -376,7 +376,7 @@ export class FluencyOverlay implements Component {
       }
       return;
     }
-    await this.performPractice(() => callbacks.recordPracticeConsent?.(confirmation.target), this.practiceFocusKey);
+    await this.performPractice(() => callbacks.activatePractice?.(confirmation.target), this.practiceFocusKey);
   }
 
   private async handlePracticeInput(data: string): Promise<void> {
@@ -761,11 +761,25 @@ export class FluencyOverlay implements Component {
     const message = confirmation.kind === "consent"
       ? "Preflight disclosure: Before main submission, full sanitized draft goes to configured Fluency model. Draft may be analyzed even if you later choose not to send it."
       : "Reset practice? This clears selected targets, consent, practice mode, and snoozes. Fluency history stays unchanged.";
-    const lines = wrapTextWithAnsi(message, Math.max(1, width - 2)).map((line) => ` ${line}`);
-    lines.push("");
-    lines.push(this.confirmationCancelFocused ? " > Cancel    Confirm" : "   Cancel  > Confirm");
-    lines.push(" Left/Right or Tab choose · Enter activate · Esc cancel");
-    return lines;
+    return wrapTextWithAnsi(message, Math.max(1, width - 2)).map((line) => ` ${line}`);
+  }
+
+  private footerLines(contentWidth: number): string[] {
+    if (this.view === "stats") return [" ↑↓/jk scroll  pgup/pgdn  p practice targets", " tab view  esc close"];
+    if (this.view !== "practice") {
+      if (this.view === "inbox") return [" ←→ card  ↑↓/jk scroll  a accept  d dismiss", " i ignore  tab view  esc close"];
+      return [" ←→ card  ↑↓/jk scroll", this.view === "ignored" ? " u restore all  tab view  esc close" : " i ignore  tab view  esc close"];
+    }
+    if (this.practicePending) return [" Saving…", " Esc disabled while saving"];
+    if (this.practiceConfirmation) {
+      const actions = this.confirmationCancelFocused ? " > Cancel · Confirm" : "   Cancel · > Confirm";
+      return contentWidth < 40
+        ? [actions, " ←→/Tab choose", " Enter activate · Esc cancel"]
+        : [actions, " Left/Right or Tab choose · Enter activate · Esc cancel"];
+    }
+    return contentWidth < 40
+      ? [" ↑↓/jk · Space toggle", " x practice on/off", " r resume now", " c reset practice", " Esc back to Stats"]
+      : [" ↑↓/jk move  Space toggle  x practice on/off", " r resume now  c reset practice  esc back to Stats"];
   }
 
   render(width: number): string[] {
@@ -792,16 +806,17 @@ export class FluencyOverlay implements Component {
     const headerLines = combinedHeaderWidth <= contentWidth
       ? [title + " ".repeat(contentWidth - visibleWidth(title) - visibleWidth(paging)) + paging]
       : [title, ...wrapTextWithAnsi(` ${paging}`, contentWidth)];
+    const footerLines = this.footerLines(contentWidth);
     const lines: string[] = [...headerLines, ` ${"─".repeat(Math.max(0, contentWidth - 2))}`];
 
     if (this.loadError) {
       this.resetDetailPaging();
       lines.push(` Could not load ${this.view === "stats" ? "statistics" : this.view === "practice" ? "practice settings" : "patterns"}: ${this.loadError}`);
     } else if (this.view === "stats" && stats) {
-      const reserved = headerLines.length + 1 + FOOTER_LINES;
+      const reserved = headerLines.length + 2 + footerLines.length;
       lines.push(...this.visibleStatsLines(stats, contentWidth, Math.max(1, innerBudget - reserved), practice));
     } else if (this.view === "practice" && stats && practice) {
-      const reserved = headerLines.length + 1 + FOOTER_LINES;
+      const reserved = headerLines.length + 2 + footerLines.length;
       const available = Math.max(1, innerBudget - reserved);
       if (this.practiceConfirmation) {
         lines.push(...this.confirmationLines(contentWidth).slice(0, available));
@@ -824,19 +839,7 @@ export class FluencyOverlay implements Component {
     }
 
     lines.push(` ${"─".repeat(Math.max(0, contentWidth - 2))}`);
-    if (this.view === "stats") {
-      lines.push(" ↑↓/jk scroll  pgup/pgdn  p practice targets");
-      lines.push(" tab view  esc close");
-    } else if (this.view === "practice") {
-      if (this.practicePending) lines.push(" Saving…");
-      else if (this.practiceConfirmation) lines.push(" Confirmation open");
-      else lines.push(" ↑↓/jk move  Space toggle  x practice on/off");
-      lines.push(" r resume now  c reset practice  esc back to Stats");
-    } else {
-      if (this.view === "inbox") lines.push(" ←→ card  ↑↓/jk scroll  a accept  d dismiss");
-      else lines.push(" ←→ card  ↑↓/jk scroll");
-      lines.push(this.view === "ignored" ? " u restore all  tab view  esc close" : " i ignore  tab view  esc close");
-    }
+    lines.push(...footerLines);
 
     const border = (text: string): string => this.callbacks?.theme.fg("border", text) ?? text;
     const top = border(`╭${"─".repeat(contentWidth)}╮`);
@@ -950,16 +953,16 @@ export async function showFluencyOverlay(
             });
             onProgressChanged?.();
           },
-          recordPracticeConsent: async (target) => {
-            await store.recordPracticeConsent(now());
-            if (target) await store.setPracticeTarget(target, true);
-            await store.setPracticeEnabled(true);
-          },
+          activatePractice: (target) => store.activatePractice(now(), target),
           setPracticeTarget: (target, selected) => store.setPracticeTarget(target, selected),
           setPracticeEnabled: (enabled) => store.setPracticeEnabled(enabled),
           resumePractice: async () => {
-            await store.resumePractice();
-            practiceRuntime?.resumeSession();
+            const practice = store.getPracticeSettings();
+            const sessionSnoozed = practiceRuntime?.sessionSnoozed() ?? false;
+            const globalSnoozed = (practice.snoozedUntil ?? 0) > now();
+            // Session entry first: if it fails, durable global state stays untouched.
+            if (sessionSnoozed) practiceRuntime?.resumeSession();
+            if (globalSnoozed) await store.resumePractice();
           },
           resetPractice: () => store.resetPractice(),
           ...(onMutationError ? { mutationError: onMutationError } : {}),

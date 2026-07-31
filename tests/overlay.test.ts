@@ -8,6 +8,7 @@ import {
 import type { FluencyStore } from "../extensions/pi-fluency/store.js";
 import { DEFAULT_PRACTICE_SETTINGS, type ReviewPattern } from "../extensions/pi-fluency/types.js";
 import {
+  emptyStats,
   makeOverlay,
   pattern,
   plain,
@@ -604,6 +605,92 @@ describe("FluencyOverlay actions", () => {
     await fixture.overlay.handleInput("\u001b[C");
     await fixture.overlay.handleInput("\r");
     expect(fixture.actions).toContain("practice-reset");
+    expect(plain(fixture.overlay.render(80)).join("\n")).toContain("> Focused · Back to Stats");
+  });
+
+  it("keeps authoritative state and focus after failed target, master, resume, and reset mutations", async () => {
+    const recurringStats = {
+      ...emptyStats,
+      rules: [{
+        patternId: "private-id",
+        rowKey: "recurring-row",
+        explanation: "Recurring rule",
+        memberPatternKeys: ["private.key"],
+        accepted: 2,
+        ratePerThousand: 20,
+        sparkline: "▁▁▁▁▁▁▁",
+        trend: "stable" as const,
+      }],
+      trendCounts: { improving: 0, worsening: 0, stable: 1, new: 0 },
+    };
+    const failure = async () => { throw new Error("write failed\u001b"); };
+
+    const target = makeOverlay({
+      initialView: "practice",
+      stats: recurringStats,
+      practice: {
+        settings: { ...DEFAULT_PRACTICE_SETTINGS, consentedAt: 1, targets: [] },
+        targets: [], sessionSnoozed: false, now: 1,
+      },
+      overrides: { setPracticeTarget: failure },
+    });
+    await target.overlay.handleInput(" ");
+    let text = plain(target.overlay.render(80)).join("\n");
+    expect(text).toContain("> Focused · [not selected] Recurring rule");
+    expect(text).toContain("Action failed: write failed?");
+
+    const master = makeOverlay({
+      initialView: "practice", stats: recurringStats,
+      practice: {
+        settings: { ...DEFAULT_PRACTICE_SETTINGS, consentedAt: 1, targets: [] },
+        targets: [], sessionSnoozed: false, now: 1,
+      },
+      overrides: { setPracticeEnabled: failure },
+    });
+    await master.overlay.handleInput("x");
+    expect(plain(master.overlay.render(80)).join("\n")).toContain("Practice mode: Off");
+
+    const resume = makeOverlay({
+      initialView: "practice", stats: recurringStats,
+      practice: {
+        settings: { ...DEFAULT_PRACTICE_SETTINGS, consentedAt: 1, snoozedUntil: 100, targets: [] },
+        targets: [], sessionSnoozed: true, now: 1,
+      },
+      overrides: { resumePractice: failure },
+    });
+    await resume.overlay.handleInput("r");
+    expect(plain(resume.overlay.render(80)).join("\n")).toContain("Session and 5-hour snooze active");
+
+    const reset = makeOverlay({ initialView: "practice", stats: recurringStats, overrides: { resetPractice: failure } });
+    await reset.overlay.handleInput("c");
+    await reset.overlay.handleInput("\u001b[C");
+    await reset.overlay.handleInput("\r");
+    text = plain(reset.overlay.render(80)).join("\n");
+    expect(text).toContain("Action failed: write failed?");
+    expect(text).toContain("> Focused · [not selected] Recurring rule");
+  });
+
+  it("focuses next historical row, then previous row, after focused removal", async () => {
+    const practice = {
+      settings: {
+        ...DEFAULT_PRACTICE_SETTINGS,
+        consentedAt: 1,
+        targets: [
+          { explanation: "First historical rule", memberPatternKeys: ["first.key"] },
+          { explanation: "Second historical rule", memberPatternKeys: ["second.key"] },
+        ],
+      },
+      targets: [
+        { explanation: "First historical rule", memberPatternKeys: ["first.key"], rowKey: "first", currentPatternKeys: [], coachingEnabled: true },
+        { explanation: "Second historical rule", memberPatternKeys: ["second.key"], rowKey: "second", currentPatternKeys: [], coachingEnabled: true },
+      ],
+      sessionSnoozed: false,
+      now: 1,
+    };
+    const fixture = makeOverlay({ initialView: "practice", practice });
+    await fixture.overlay.handleInput(" ");
+    expect(plain(fixture.overlay.render(80)).join("\n")).toContain("> Focused · [selected] Second historical rule");
+    await fixture.overlay.handleInput(" ");
     expect(plain(fixture.overlay.render(80)).join("\n")).toContain("> Focused · Back to Stats");
   });
 
