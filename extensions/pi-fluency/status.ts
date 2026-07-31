@@ -9,6 +9,7 @@ export type StatusState =
     ratePerThousand: number | undefined;
   }
   | { kind: "initial-loading" }
+  | { kind: "practice-check" }
   | { kind: "error"; reason: StatusErrorReason }
   | { kind: "hidden" };
 
@@ -31,6 +32,8 @@ export function formatStatus(state: StatusState): string | undefined {
     }
     case "initial-loading":
       return `󰇰 …  󰌵 …  ${EMPTY_SPARKLINE} —/k`;
+    case "practice-check":
+      return "󰌵 CHECK";
     case "error":
       return `󰅙 ERR ${state.reason}`;
     case "hidden":

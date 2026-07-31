@@ -70,6 +70,17 @@ type LockProvider = (file: string, options: LockOptions) => Promise<() => Promis
 type FileReplacer = (temporary: string, destination: string) => Promise<void>;
 type PolicyFileReader = (path: string) => Promise<string>;
 
+export interface AnalysisCommitFence {
+  historyGeneration: string;
+  enabled: boolean;
+  consentedAt?: number;
+  provider?: string;
+  modelId?: string;
+  minimumConfidence: number;
+}
+
+export type ConditionalAppendResult = "committed" | "generation-stale" | "configuration-stale";
+
 const errantCategorySet = new Set<string>(ERRANT_CATEGORIES);
 
 function copySettings(settings: FluencySettings): FluencySettings {
@@ -188,6 +199,17 @@ export class FluencyStore {
   getSettings(): FluencySettings { return copySettings(this.settings); }
   getPracticeSettings(): PracticeSettings { return copyPracticeSettings(this.practice); }
   getWarnings(): string[] { return [...this.warnings]; }
+
+  captureAnalysisCommitFence(settings: FluencySettings = this.settings): AnalysisCommitFence {
+    return {
+      historyGeneration: this.historyGeneration,
+      enabled: settings.enabled,
+      minimumConfidence: settings.minimumConfidence,
+      ...(settings.consentedAt === undefined ? {} : { consentedAt: settings.consentedAt }),
+      ...(settings.provider === undefined ? {} : { provider: settings.provider }),
+      ...(settings.modelId === undefined ? {} : { modelId: settings.modelId }),
+    };
+  }
 
   private async hardenExistingFiles(): Promise<void> {
     for (const path of [this.historyPath, this.settingsPath, this.practicePath, this.historyGenerationPath]) {
@@ -649,30 +671,61 @@ export class FluencyStore {
     this.settings = copied;
   }
 
-  appendAnalysis(prompt: CollectedPrompt, result: AnalysisResult): Promise<void> {
+  private analysisEvent(prompt: CollectedPrompt, result: AnalysisResult): FluencyEvent {
     const copiedPrompt: CollectedPrompt = {
       promptHash: prompt.promptHash,
       prose: prompt.prose,
       observedAt: prompt.observedAt,
     };
+    if (result.schemaVersion !== 3) throw new Error("Invalid schema-v4 history event");
+    return decodeHistoryLine({
+      schemaVersion: HISTORY_SCHEMA_VERSION,
+      type: "analysis",
+      at: copiedPrompt.observedAt,
+      prompt: copiedPrompt,
+      wordCount: countEnglishWords(copiedPrompt.prose),
+      result: copyAnalysisResult(result),
+    });
+  }
+
+  appendAnalysis(prompt: CollectedPrompt, result: AnalysisResult): Promise<void> {
     let event: FluencyEvent;
     try {
-      if (result.schemaVersion !== 3) throw new Error("Invalid schema-v4 history event");
-      const sanitizedResult = copyAnalysisResult(result);
-      event = decodeHistoryLine({
-        schemaVersion: HISTORY_SCHEMA_VERSION,
-        type: "analysis",
-        at: copiedPrompt.observedAt,
-        prompt: copiedPrompt,
-        wordCount: countEnglishWords(copiedPrompt.prose),
-        result: sanitizedResult,
-      });
+      event = this.analysisEvent(prompt, result);
     } catch (error) {
       return Promise.reject(error);
     }
     return this.enqueueMutation((signal) => {
       this.assertHistoryReady();
       return this.appendUnsafe(event, signal);
+    });
+  }
+
+  /** Append precomputed result only while clear generation and analyzer authorization remain exact. */
+  conditionalAppendAnalysis(
+    fence: AnalysisCommitFence,
+    prompt: CollectedPrompt,
+    result: AnalysisResult,
+  ): Promise<ConditionalAppendResult> {
+    let event: FluencyEvent;
+    try {
+      event = this.analysisEvent(prompt, result);
+    } catch (error) {
+      return Promise.reject(error);
+    }
+    return this.enqueueMutation(async (signal) => {
+      if (this.historyGeneration !== fence.historyGeneration) return "generation-stale";
+      const current = this.settings;
+      if (!current.enabled
+        || current.consentedAt === undefined
+        || current.enabled !== fence.enabled
+        || current.consentedAt !== fence.consentedAt
+        || current.provider !== fence.provider
+        || current.modelId !== fence.modelId
+        || current.minimumConfidence !== fence.minimumConfidence) return "configuration-stale";
+      this.assertHistoryReady();
+      await this.appendUnsafe(event, signal);
+      return "committed";
     });
   }
 

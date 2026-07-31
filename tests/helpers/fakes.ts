@@ -65,8 +65,13 @@ export class FakeExtensionApi {
     return this as unknown as FakeExtensionApi & ExtensionAPI;
   }
 
-  async emit(event: string, value: unknown, ctx: ExtensionContext): Promise<void> {
-    for (const handler of this.handlers.get(event) ?? []) await handler(value, ctx);
+  async emit(event: string, value: unknown, ctx: ExtensionContext): Promise<unknown> {
+    let result: unknown;
+    for (const handler of this.handlers.get(event) ?? []) {
+      const current = await handler(value, ctx);
+      if (current !== undefined) result = current;
+    }
+    return result;
   }
 }
 
@@ -80,13 +85,15 @@ export interface ExtensionHarness {
   select: MockedFunction<ExtensionContext["ui"]["select"]>;
   confirm: MockedFunction<ExtensionContext["ui"]["confirm"]>;
   custom: MockedFunction<ExtensionContext["ui"]["custom"]>;
+  editorWrites: string[];
+  get editorText(): string;
   get abortObserved(): boolean;
   get cleanupFinished(): boolean;
   finishAbortCleanup(): void;
   rejectAnalysis(error?: Error): void;
   removeModel(): void;
   emitSessionStart(): Promise<void>;
-  emitInput(text: string, source?: "interactive" | "rpc" | "extension"): Promise<void>;
+  emitInput(text: string, source?: "interactive" | "rpc" | "extension", options?: { images?: unknown[]; streamingBehavior?: "steer" | "followUp" }): Promise<unknown>;
   emitMessageEnd(message: unknown): Promise<void>;
   emitAgentSettled(): Promise<void>;
   emitSessionShutdown(reason: "quit" | "reload" | "new" | "resume" | "fork"): Promise<void>;
@@ -122,6 +129,7 @@ export async function createExtensionHarness(options: {
   enabled: boolean;
   analyzerMode?: "resolve" | "wait-for-abort" | "wait-for-abort-cleanup" | "wait-for-error";
   analysisResult?: AnalysisResult;
+  editorFailure?: "preserve" | "clear";
 }): Promise<ExtensionHarness> {
   const rootDir = await mkdtemp(join(tmpdir(), "pi-fluency-extension-"));
   if (options.enabled) {
@@ -188,10 +196,18 @@ export async function createExtensionHarness(options: {
   const select = vi.fn(selectImpl);
   const confirm = vi.fn(confirmImpl);
   const custom = vi.fn(customImpl);
+  let editorText = "";
+  const editorWrites: string[] = [];
   const ui = {
     select,
     confirm,
     custom,
+    setEditorText: (text: string) => {
+      if ((options.editorFailure === "preserve" && text !== "")
+        || (options.editorFailure === "clear" && text === "")) throw new Error("editor write failed");
+      editorText = text;
+      editorWrites.push(text);
+    },
     notify: (message: string, type?: string) => notifications.push(type === undefined ? { message } : { message, type }),
     setStatus: (key: string, value: string | undefined) => {
       if (value === undefined) statuses.delete(key);
@@ -207,9 +223,14 @@ export async function createExtensionHarness(options: {
     find: (provider: string, id: string) => modelAvailable && provider === model.provider && id === model.id ? model : undefined,
     getApiKeyAndHeaders: vi.fn().mockResolvedValue({ ok: true, apiKey: "fake-key" }),
   };
+  const sessionEntries: Array<{ type: "custom"; customType: string; data: unknown }> = [];
   const ctx = {
     ui,
     modelRegistry: registry,
+    sessionManager: {
+      getSessionFile: () => join(rootDir, "session.jsonl"),
+      getEntries: () => sessionEntries,
+    },
     mode: "tui",
     hasUI: true,
     cwd: rootDir,
@@ -217,25 +238,33 @@ export async function createExtensionHarness(options: {
     isIdle: () => true,
   } as unknown as ExtensionCommandContext;
   const fakePi = new FakeExtensionApi();
+  (fakePi as unknown as { appendEntry: (customType: string, data: unknown) => void }).appendEntry = (customType, data) => {
+    sessionEntries.push({ type: "custom", customType, data });
+  };
 
-  const emitSessionStart = () =>
-    fakePi.emit("session_start", { type: "session_start" }, ctx);
+  const emitSessionStart = async (): Promise<void> => {
+    await fakePi.emit("session_start", { type: "session_start" }, ctx);
+  };
   const emitInput = (
     text: string,
     source: "interactive" | "rpc" | "extension" = "interactive",
+    options: { images?: unknown[]; streamingBehavior?: "steer" | "followUp" } = {},
   ) => fakePi.emit("input", {
     type: "input",
     text,
-    images: [],
+    images: options.images ?? [],
     source,
-    streamingBehavior: undefined,
+    streamingBehavior: options.streamingBehavior,
   }, ctx);
-  const emitMessageEnd = (message: unknown) =>
-    fakePi.emit("message_end", { type: "message_end", message }, ctx);
-  const emitAgentSettled = () =>
-    fakePi.emit("agent_settled", { type: "agent_settled" }, ctx);
-  const emitSessionShutdown = (reason: "quit" | "reload" | "new" | "resume" | "fork") =>
-    fakePi.emit("session_shutdown", { type: "session_shutdown", reason }, ctx);
+  const emitMessageEnd = async (message: unknown): Promise<void> => {
+    await fakePi.emit("message_end", { type: "message_end", message }, ctx);
+  };
+  const emitAgentSettled = async (): Promise<void> => {
+    await fakePi.emit("agent_settled", { type: "agent_settled" }, ctx);
+  };
+  const emitSessionShutdown = async (reason: "quit" | "reload" | "new" | "resume" | "fork"): Promise<void> => {
+    await fakePi.emit("session_shutdown", { type: "session_shutdown", reason }, ctx);
+  };
   const runCommand = async (args = ""): Promise<void> => {
     const handler = fakePi.commands.get("fluency");
     if (!handler) throw new Error("fluency command not registered");
@@ -257,6 +286,8 @@ export async function createExtensionHarness(options: {
     select,
     confirm,
     custom,
+    editorWrites,
+    get editorText() { return editorText; },
     get abortObserved() { return abortObserved; },
     get cleanupFinished() { return cleanupFinished; },
     finishAbortCleanup: abortCleanup.resolve,

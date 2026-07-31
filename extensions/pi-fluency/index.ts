@@ -8,15 +8,29 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 import { Key } from "@earendil-works/pi-tui";
 import { AnalyzerConfigurationError, ModelAnalyzer, type Analyzer } from "./analyzer.js";
-import { computeFluencyAnalytics } from "./analytics.js";
+import { computeFluencyAnalytics, selectPracticeAnalysisContext } from "./analytics.js";
 import { collectPrompt } from "./collector.js";
+import {
+  showCoachingOverlay,
+  type CoachingCheckResult,
+  type CoachingOverlayDecision,
+  type CoachingSnoozeDecision,
+  type CoachingSnoozeHandler,
+} from "./coaching-overlay.js";
+import {
+  analysisReuseAction,
+  analyzerResultFingerprint,
+  isCoachingEligible,
+  revalidateCoachingPolicy,
+  selectedCoachingMistakes,
+} from "./coaching.js";
 import { showFluencyOverlay, type FluencyView } from "./overlay.js";
 import { PracticeSessionSnooze } from "./practice-settings.js";
 import { sanitizeTerminalLabel } from "./sanitize.js";
 import { runSetup } from "./setup.js";
 import { formatStatus, type StatusErrorReason, type StatusState } from "./status.js";
 import { FluencyStore } from "./store.js";
-import type { FluencySettings } from "./types.js";
+import type { FluencySettings, PracticeSettings } from "./types.js";
 import { FluencyWorker } from "./worker.js";
 
 const STATUS_KEY = "pi-fluency";
@@ -37,11 +51,19 @@ export type OpenInbox = (
   options: OpenInboxOptions,
 ) => Promise<void> | void;
 
+export type ShowCoaching = (
+  ctx: ExtensionContext,
+  check: Promise<CoachingCheckResult>,
+  signal?: AbortSignal,
+  saveSnooze?: CoachingSnoozeHandler,
+) => Promise<CoachingOverlayDecision>;
+
 export interface ExtensionDependencies {
   rootDir?: string;
   analyzerFactory?: (ctx: ExtensionContext, store: FluencyStore) => Analyzer;
   now?: () => number;
   openInbox?: OpenInbox;
+  showCoaching?: ShowCoaching;
 }
 
 interface ResolvedDependencies extends ExtensionDependencies {
@@ -78,14 +100,17 @@ function registerHandlers(pi: ExtensionAPI, dependencies: ResolvedDependencies):
   const inputSessionId = randomUUID();
   let inputSequence = 0;
   const practiceSessionSnooze = new PracticeSessionSnooze();
+  const coachingControllers = new Set<AbortController>();
+  const scheduledCommits = new Set<Promise<void>>();
 
   const sessionFile = (ctx: ExtensionContext): string | undefined =>
     ctx.sessionManager?.getSessionFile?.();
   const sessionEntries = (ctx: ExtensionContext) => ctx.sessionManager?.getEntries?.() ?? [];
-  const isSessionPracticeSnoozed = (ctx: ExtensionContext, store: FluencyStore): boolean => {
-    const practice = store.getPracticeSettings();
-    return practiceSessionSnooze.restore(sessionEntries(ctx), sessionFile(ctx), practice.epoch);
-  };
+  const isSessionPracticeSnoozed = (
+    ctx: ExtensionContext,
+    store: FluencyStore,
+    practice: PracticeSettings = store.getPracticeSettings(),
+  ): boolean => practiceSessionSnooze.restore(sessionEntries(ctx), sessionFile(ctx), practice.epoch);
   const resumeSessionPractice = (ctx: ExtensionContext, store: FluencyStore): void => {
     const practice = store.getPracticeSettings();
     practiceSessionSnooze.resume(
@@ -180,9 +205,12 @@ function registerHandlers(pi: ExtensionAPI, dependencies: ResolvedDependencies):
     }
   };
 
-  const createAnalyzer = (ctx: ExtensionContext, store: FluencyStore): Analyzer => {
+  const createAnalyzer = (
+    ctx: ExtensionContext,
+    store: FluencyStore,
+    settings: FluencySettings = store.getSettings(),
+  ): Analyzer => {
     if (dependencies.analyzerFactory) return dependencies.analyzerFactory(ctx, store);
-    const settings = store.getSettings();
     const model = settings.provider && settings.modelId
       ? ctx.modelRegistry.find(settings.provider, settings.modelId)
       : undefined;
@@ -198,6 +226,13 @@ function registerHandlers(pi: ExtensionAPI, dependencies: ResolvedDependencies):
     ctxRef = ctx;
     workerRef ??= new FluencyWorker({
       analyzer: createAnalyzer(ctx, store),
+      getAnalyzerConfiguration: () => {
+        const settings = store.getSettings();
+        return {
+          fingerprint: analyzerResultFingerprint(settings),
+          analyzer: createAnalyzer(ctxRef ?? ctx, store, settings),
+        };
+      },
       isIdle: () => ctxRef?.isIdle() ?? false,
       getPatterns: () => store.listKnownPatterns(),
       onResult: async (prompt, result) => {
@@ -439,14 +474,10 @@ function registerHandlers(pi: ExtensionAPI, dependencies: ResolvedDependencies):
   });
 
   pi.on("input", async (event, ctx) => {
+    const handlerStartedAt = Date.now();
+    const foregroundDeadline = handlerStartedAt + 6_000;
     if (shuttingDown || event.source !== "interactive") return;
     ctxRef = ctx;
-    const store = await getStore();
-    if (shuttingDown) return;
-    if (!hasValidConfiguration(store.getSettings(), ctx)) {
-      publishConfigurationFailureOrClear(ctx, store);
-      return;
-    }
     const collected = collectPrompt(event.text, dependencies.now());
     if (!collected) return;
     const prompt = {
@@ -455,12 +486,290 @@ function registerHandlers(pi: ExtensionAPI, dependencies: ResolvedDependencies):
         .update(`${collected.promptHash}\0${inputSessionId}\0${inputSequence++}`)
         .digest("hex"),
     };
-    if (store.hasProcessedPromptHash(prompt.promptHash)) return;
-    try {
-      getWorker(ctx, store).enqueue(prompt);
-    } catch (error) {
-      setError(ctx, analyzerErrorReason(error), error);
+    const idleTextOnly = ctx.isIdle()
+      && event.streamingBehavior === undefined
+      && (event.images?.length ?? 0) === 0;
+
+    // Enter may already have emptied Pi's editor. Preserve received bytes before any preflight I/O.
+    if (idleTextOnly) {
+      try {
+        ctx.ui.setEditorText(event.text);
+      } catch {
+        // Original event still owns submission. Only ordinary background collection may follow.
+        try {
+          const fallbackStore = await getStore();
+          if (!shuttingDown && hasValidConfiguration(fallbackStore.getSettings(), ctx)) {
+            getWorker(ctx, fallbackStore).enqueue(prompt);
+          }
+        } catch { /* Original input remains fail-open. */ }
+        return;
+      }
     }
+
+    let store: FluencyStore;
+    try {
+      store = await getStore();
+    } catch {
+      if (!idleTextOnly) return;
+      try {
+        ctx.ui.setEditorText("");
+        ctx.ui.notify("Sent without practice check — policy unavailable.", "warning");
+        return { action: "continue" };
+      } catch {
+        ctx.ui.notify("Not sent — editor could not be cleared.", "error");
+        return { action: "handled" };
+      }
+    }
+    if (shuttingDown) {
+      if (idleTextOnly) {
+        try { ctx.ui.setEditorText(""); } catch { return { action: "handled" }; }
+        return { action: "continue" };
+      }
+      return;
+    }
+    const queueBackground = (): void => {
+      try {
+        getWorker(ctx, store).enqueue(prompt);
+      } catch (error) {
+        setError(ctx, analyzerErrorReason(error), error);
+      }
+    };
+    if (!hasValidConfiguration(store.getSettings(), ctx)) {
+      publishConfigurationFailureOrClear(ctx, store);
+      if (!idleTextOnly) return;
+      try { ctx.ui.setEditorText(""); } catch {
+        ctx.ui.notify("Not sent — editor could not be cleared.", "error");
+        return { action: "handled" };
+      }
+      return { action: "continue" };
+    }
+    if (store.hasProcessedPromptHash(prompt.promptHash)) {
+      if (!idleTextOnly) return;
+      try { ctx.ui.setEditorText(""); } catch { return { action: "handled" }; }
+      return { action: "continue" };
+    }
+    if (!idleTextOnly) {
+      queueBackground();
+      return;
+    }
+    let backgroundAllowed = true;
+    const restoreInputStatus = (): void => {
+      if (shuttingDown || !backgroundAllowed) clearStatus(ctx);
+      else publishProgress(ctx, store);
+    };
+    const clearForContinue = (): boolean => {
+      try {
+        ctx.ui.setEditorText("");
+        return true;
+      } catch {
+        ctx.ui.notify("Not sent — editor could not be cleared.", "error");
+        restoreInputStatus();
+        return false;
+      }
+    };
+    const failOpen = (message: string): { action: "continue" } | { action: "handled" } => {
+      if (backgroundAllowed) queueBackground();
+      if (!clearForContinue()) return { action: "handled" };
+      ctx.ui.notify(message, "warning");
+      restoreInputStatus();
+      return { action: "continue" };
+    };
+
+    let initialPolicy;
+    try {
+      initialPolicy = await store.getFreshPolicySnapshot(foregroundDeadline);
+    } catch {
+      return failOpen("Sent without practice check — policy unavailable.");
+    }
+    const initialSessionSnoozed = isSessionPracticeSnoozed(ctx, store, initialPolicy.practice);
+    if (!hasValidConfiguration(initialPolicy.settings, ctx)
+      || !isCoachingEligible({
+        source: event.source,
+        idle: true,
+        textOnly: true,
+        collectionEligible: true,
+        sessionSnoozed: initialSessionSnoozed,
+        now: dependencies.now(),
+        policy: initialPolicy,
+      })) {
+      if (!clearForContinue()) return { action: "handled" };
+      if (hasValidConfiguration(initialPolicy.settings, ctx)) queueBackground();
+      return { action: "continue" };
+    }
+
+    const commitFence = store.captureAnalysisCommitFence(initialPolicy.settings);
+    publishStatus(ctx, { kind: "practice-check" });
+    const attemptController = new AbortController();
+    coachingControllers.add(attemptController);
+    let successfulResult: Awaited<ReturnType<Analyzer["analyze"]>> | undefined;
+    let checkPolicy = initialPolicy;
+    let checkSessionSnoozed = initialSessionSnoozed;
+    let analyzerChangeObserved = false;
+    let technicalFailureMessage = "Sent without practice check — analyzer busy/timed out/failed.";
+    const checkPromise: Promise<CoachingCheckResult> = (async () => {
+      try {
+        const context = selectPracticeAnalysisContext(initialPolicy.practice.targets, store.listKnownPatterns());
+        const outcome = await getWorker(ctx, store).analyzeForeground({
+          analyzer: createAnalyzer(ctx, store, initialPolicy.settings),
+          prompt,
+          patterns: context.patterns,
+          selectedTargets: context.targetDescriptors,
+          deadline: foregroundDeadline,
+          signal: attemptController.signal,
+          abortGraceMs: 100,
+        });
+        if (outcome.kind !== "success") {
+          if (outcome.kind === "quarantined") {
+            technicalFailureMessage = "Sent without practice check — analyzer unavailable; restart Pi to restore practice.";
+          }
+          return { kind: "failure" };
+        }
+        successfulResult = outcome.result;
+        checkPolicy = await store.getFreshPolicySnapshot(foregroundDeadline);
+        checkSessionSnoozed = isSessionPracticeSnoozed(ctx, store, checkPolicy.practice);
+        const revalidation = revalidateCoachingPolicy(
+          initialPolicy,
+          checkPolicy,
+          initialSessionSnoozed,
+          checkSessionSnoozed,
+        );
+        analyzerChangeObserved = revalidation === "analyzer-changed";
+        if (revalidation === "analytics-disabled" || revalidation === "analyzer-changed") {
+          if (revalidation === "analytics-disabled") backgroundAllowed = false;
+          return { kind: "failure" };
+        }
+        const gateStillEligible = isCoachingEligible({
+          source: event.source,
+          idle: true,
+          textOnly: true,
+          collectionEligible: true,
+          sessionSnoozed: checkSessionSnoozed,
+          now: dependencies.now(),
+          policy: checkPolicy,
+        });
+        const matches = gateStillEligible
+          ? selectedCoachingMistakes(outcome.result, checkPolicy.settings, checkPolicy.practice)
+          : [];
+        return matches.length === 0
+          ? { kind: "clean" }
+          : { kind: "matches", mistakes: matches, targets: checkPolicy.practice.targets };
+      } catch {
+        return { kind: "failure" };
+      }
+    })();
+
+    let snoozePersisted = false;
+    const persistSnooze = async (action: CoachingSnoozeDecision): Promise<void> => {
+      snoozePersisted = true;
+      if (action === "snooze-session") {
+        try {
+          practiceSessionSnooze.snooze(
+            sessionFile(ctx),
+            checkPolicy.practice.epoch,
+            (customType, data) => pi.appendEntry(customType, data),
+          );
+        } catch {
+          ctx.ui.notify("Sent once; conversation snooze was not activated.", "warning");
+        }
+        return;
+      }
+      const operationDeadline = Date.now() + 1_000;
+      let activated = false;
+      try {
+        const mutation = store.snoozePracticeForFiveHours(
+          checkPolicy.practice.revision,
+          operationDeadline,
+          dependencies.now(),
+        );
+        activated = await Promise.race([
+          mutation,
+          new Promise<false>((resolve) => setTimeout(() => resolve(false), Math.max(0, operationDeadline - Date.now()))),
+        ]);
+        if (!activated) {
+          const authoritative = await store.getFreshPolicySnapshot(Date.now() + 1_000);
+          activated = (authoritative.practice.snoozedUntil ?? 0) > dependencies.now();
+          if (!activated) ctx.ui.notify("Sent once; 5-hour snooze was not activated.", "warning");
+        }
+      } catch {
+        try {
+          const authoritative = await store.getFreshPolicySnapshot(Date.now() + 1_000);
+          activated = (authoritative.practice.snoozedUntil ?? 0) > dependencies.now();
+          if (!activated) ctx.ui.notify("Sent once; 5-hour snooze was not activated.", "warning");
+        } catch {
+          ctx.ui.notify("Sent once; snooze state unknown — use /fluency practice resume.", "warning");
+        }
+      }
+    };
+
+    let decision: CoachingOverlayDecision;
+    try {
+      decision = await (dependencies.showCoaching ?? showCoachingOverlay)(
+        ctx,
+        checkPromise,
+        attemptController.signal,
+        persistSnooze,
+      );
+    } catch {
+      decision = "technical-failure";
+    }
+    if (decision === "edit") {
+      attemptController.abort();
+      await checkPromise;
+      coachingControllers.delete(attemptController);
+      ctx.ui.notify("Not sent — draft remains in editor.", "info");
+      restoreInputStatus();
+      return { action: "handled" };
+    }
+    if (decision === "send-unchecked" || decision === "technical-failure") {
+      attemptController.abort();
+      await checkPromise;
+      coachingControllers.delete(attemptController);
+      return failOpen(decision === "send-unchecked"
+        ? "Sent without practice check — analyzer cancelled."
+        : technicalFailureMessage);
+    }
+    coachingControllers.delete(attemptController);
+
+    if ((decision === "snooze-session" || decision === "snooze-five-hours") && !snoozePersisted) {
+      await persistSnooze(decision);
+    }
+
+    if (!clearForContinue()) return { action: "handled" };
+
+    if (successfulResult !== undefined) {
+      let finalPolicy = checkPolicy;
+      let finalSessionSnoozed = checkSessionSnoozed;
+      try {
+        finalPolicy = await store.getFreshPolicySnapshot(Date.now() + 1_000);
+        finalSessionSnoozed = isSessionPracticeSnoozed(ctx, store, finalPolicy.practice);
+      } catch { /* Conditional store fence remains authoritative. */ }
+      const revalidation = revalidateCoachingPolicy(
+        initialPolicy,
+        finalPolicy,
+        initialSessionSnoozed,
+        finalSessionSnoozed,
+      );
+      const reuse = analysisReuseAction("continue", revalidation);
+      if (reuse === "commit-foreground") {
+        let tracked!: Promise<void>;
+        tracked = store.conditionalAppendAnalysis(commitFence, prompt, successfulResult)
+          .then((result) => {
+            if (result === "configuration-stale" && !shuttingDown) queueBackground();
+            else if (result === "committed" && !shuttingDown) publishProgress(ctx, store);
+          })
+          .catch((error) => {
+            if (!shuttingDown) setError(ctx, "store", error);
+          })
+          .finally(() => scheduledCommits.delete(tracked));
+        scheduledCommits.add(tracked);
+      } else if (reuse === "queue-background" || analyzerChangeObserved) {
+        queueBackground();
+      }
+    } else {
+      queueBackground();
+    }
+    restoreInputStatus();
+    return { action: "continue" };
   });
 
   pi.on("agent_settled", (_event, ctx) => {
@@ -487,7 +796,14 @@ function registerHandlers(pi: ExtensionAPI, dependencies: ResolvedDependencies):
       const shutdownCtx = ctxRef;
       if (shutdownCtx) clearStatus(shutdownCtx);
       overlayController?.abort();
-      await Promise.all([workerRef?.shutdown(), overlayOpen]);
+      for (const controller of coachingControllers) controller.abort();
+      const commits = Promise.allSettled([...scheduledCommits]);
+      await Promise.all([
+        workerRef?.shutdown(),
+        overlayOpen,
+        Promise.race([commits, new Promise<void>((resolve) => setTimeout(resolve, 100))]),
+      ]);
+      coachingControllers.clear();
       if (shutdownCtx) clearStatus(shutdownCtx);
       workerRef = undefined;
       overlayOpen = undefined;

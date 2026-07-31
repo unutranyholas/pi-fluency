@@ -104,6 +104,55 @@ describe("FluencyStore generation recovery", () => {
     expect(reopened.listInbox()[0]?.occurrenceCount).toBe(1);
   });
 
+  it("discards delayed precomputed analysis after clear generation changes", async () => {
+    const store = await FluencyStore.open(root);
+    await store.updateSettings({
+      ...DEFAULT_SETTINGS,
+      enabled: true,
+      consentedAt: 1,
+      provider: "provider",
+      modelId: "model",
+    });
+    const fence = store.captureAnalysisCommitFence();
+    await (await FluencyStore.open(root)).clear();
+
+    expect(await store.conditionalAppendAnalysis(fence, collected("stale-after-clear"), result))
+      .toBe("generation-stale");
+    expect((await FluencyStore.open(root)).hasProcessedPromptHash("stale-after-clear")).toBe(false);
+  });
+
+  it("discards delayed precomputed analysis after consent or analyzer configuration changes", async () => {
+    const store = await FluencyStore.open(root);
+    await store.updateSettings({
+      ...DEFAULT_SETTINGS,
+      enabled: true,
+      consentedAt: 1,
+      provider: "provider",
+      modelId: "model",
+    });
+    const fence = store.captureAnalysisCommitFence();
+    await (await FluencyStore.open(root)).updateSettings({ modelId: "new-model" });
+
+    expect(await store.conditionalAppendAnalysis(fence, collected("stale-config"), result))
+      .toBe("configuration-stale");
+    expect((await FluencyStore.open(root)).hasProcessedPromptHash("stale-config")).toBe(false);
+  });
+
+  it("conditionally appends once when generation and analyzer authorization stay exact", async () => {
+    const store = await FluencyStore.open(root);
+    await store.updateSettings({
+      ...DEFAULT_SETTINGS,
+      enabled: true,
+      consentedAt: 1,
+      provider: "provider",
+      modelId: "model",
+    });
+    const fence = store.captureAnalysisCommitFence();
+
+    expect(await store.conditionalAppendAnalysis(fence, collected("fresh-config"), result)).toBe("committed");
+    expect((await FluencyStore.open(root)).hasProcessedPromptHash("fresh-config")).toBe(true);
+  });
+
   it("finishes an interrupted clear before replaying durable history", async () => {
     const store = await FluencyStore.open(root);
     await store.appendAnalysis(collected("must-stay-cleared", 100), result);

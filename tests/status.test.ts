@@ -45,6 +45,7 @@ describe("formatStatus", () => {
 
   it.each([
     [{ kind: "initial-loading" } as const, "󰇰 …  󰌵 …  ······· —/k"],
+    [{ kind: "practice-check" } as const, "󰌵 CHECK"],
     [{ kind: "hidden" } as const, undefined],
   ])("formats lifecycle state %#", (input, expected) => {
     expect(formatStatus(input)).toBe(expected);
