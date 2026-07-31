@@ -1279,6 +1279,50 @@ describe("Pi Fluency extension", () => {
     }
   });
 
+  it.each([
+    ["Send unchecked", "send-unchecked", "continue"],
+    ["Edit", "edit", "handled"],
+  ] as const)("%s cancels a hung post-analysis policy read within cancellation grace", async (_label, decision, action) => {
+    const harness = await createExtensionHarness({ enabled: true });
+    const store = await FluencyStore.open(harness.deps.rootDir);
+    await store.activatePractice(2, {
+      explanation: oneMistake.mistakes[0]!.explanation,
+      memberPatternKeys: [oneMistake.mistakes[0]!.patternKey],
+    });
+    type PolicyFileReader = (path: string) => Promise<string>;
+    const storeClass = FluencyStore as unknown as { policyFileReader: PolicyFileReader };
+    const originalReader = storeClass.policyFileReader;
+    let reads = 0;
+    let postAnalysisReadStarted!: () => void;
+    const postAnalysisRead = new Promise<void>((resolve) => { postAnalysisReadStarted = resolve; });
+    storeClass.policyFileReader = (path) => {
+      reads += 1;
+      // Initial and coordinator authorization snapshots each perform six reads.
+      if (reads > 12) {
+        postAnalysisReadStarted();
+        return new Promise<string>(() => undefined);
+      }
+      return originalReader(path);
+    };
+    try {
+      createFluencyExtension({
+        ...harness.deps,
+        showCoaching: async () => {
+          await postAnalysisRead;
+          return decision;
+        },
+      })(harness.pi);
+      const started = Date.now();
+      expect(await harness.emitInput("I made an mistake before the post-analysis policy read hangs."))
+        .toEqual({ action });
+      expect(Date.now() - started).toBeLessThan(1_000);
+      expect(harness.analyzer.analyze).toHaveBeenCalledOnce();
+      expect(reads).toBe(13);
+    } finally {
+      storeClass.policyFileReader = originalReader;
+    }
+  });
+
   it("authoritatively resumes five-hour snooze created through another store", async () => {
     const harness = await createExtensionHarness({ enabled: true });
     createFluencyExtension(harness.deps)(harness.pi);
@@ -1320,6 +1364,37 @@ describe("Pi Fluency extension", () => {
     resolve(oneMistake);
     await draining;
 
+    expect(harness.analyzer.analyze).toHaveBeenCalledOnce();
+    expect((await FluencyStore.open(harness.deps.rootDir)).getAnalyticsSnapshot().observations).toEqual([]);
+  });
+
+  it("prevents a cross-store pause from reaching provider while background waits for coordinator", async () => {
+    const harness = await createExtensionHarness({ enabled: true });
+    let resolveForeground!: (result: AnalysisResult) => void;
+    harness.analyzer.analyze.mockImplementationOnce(() => new Promise((resolve) => { resolveForeground = resolve; }));
+    const store = await FluencyStore.open(harness.deps.rootDir);
+    await store.activatePractice(2, {
+      explanation: oneMistake.mistakes[0]!.explanation,
+      memberPatternKeys: [oneMistake.mistakes[0]!.patternKey],
+    });
+    const showCoaching = vi.fn(async (_ctx, check) => {
+      expect((await check).kind).toBe("failure");
+      return "technical-failure" as const;
+    });
+    createFluencyExtension({ ...harness.deps, showCoaching })(harness.pi);
+
+    const foreground = harness.emitInput("I made an mistake while holding coordinator ownership.");
+    await vi.waitFor(() => expect(harness.analyzer.analyze).toHaveBeenCalledOnce());
+    await harness.emitInput("Queued background prompt must observe later pause.", "interactive", { images: [{}] });
+    const draining = harness.emitAgentSettled();
+    await new Promise((resolve) => setTimeout(resolve, 25));
+
+    const otherStore = await FluencyStore.open(harness.deps.rootDir);
+    await otherStore.updateSettings({ enabled: false });
+    resolveForeground(oneMistake);
+
+    expect(await foreground).toEqual({ action: "continue" });
+    await draining;
     expect(harness.analyzer.analyze).toHaveBeenCalledOnce();
     expect((await FluencyStore.open(harness.deps.rootDir)).getAnalyticsSnapshot().observations).toEqual([]);
   });

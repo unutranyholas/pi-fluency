@@ -489,22 +489,26 @@ export class FluencyWorker {
       if (delayMs > 0) await abortableDelay(delayMs, this.controller.signal);
       if (this.shuttingDown) throw new DOMException("Aborted", "AbortError");
 
-      const timeoutSignal = AbortSignal.timeout(ANALYSIS_TIMEOUT_MS);
       try {
-        const configured = this.options.getAnalyzerConfiguration?.(job);
-        let fresh: WorkerAnalyzerConfiguration | undefined;
-        if (configured !== undefined && typeof (configured as Promise<WorkerAnalyzerConfiguration | undefined>).then === "function") {
-          fresh = await (configured as Promise<WorkerAnalyzerConfiguration | undefined>);
-        } else {
-          fresh = configured as WorkerAnalyzerConfiguration | undefined;
-        }
-        if (this.options.getAnalyzerConfiguration !== undefined && fresh === undefined) return undefined;
-        if (fresh !== undefined) this.analyzerConfiguration = fresh;
-        return await this.coordinator.runBackground(this.owner, (coordinatorSignal) => this.analyzerConfiguration.analyzer.analyze(
-          job.prompt,
-          this.options.getPatterns(),
-          AbortSignal.any([this.controller!.signal, timeoutSignal, coordinatorSignal]),
-        ));
+        return await this.coordinator.runBackground(this.owner, async (coordinatorSignal) => {
+          // Resolve durable authorization/configuration only after coordinator waits. Keep it
+          // adjacent to each provider attempt so queued jobs cannot use pre-wait consent.
+          const configured = this.options.getAnalyzerConfiguration?.(job);
+          let fresh: WorkerAnalyzerConfiguration | undefined;
+          if (configured !== undefined && typeof (configured as Promise<WorkerAnalyzerConfiguration | undefined>).then === "function") {
+            fresh = await (configured as Promise<WorkerAnalyzerConfiguration | undefined>);
+          } else {
+            fresh = configured as WorkerAnalyzerConfiguration | undefined;
+          }
+          if (this.options.getAnalyzerConfiguration !== undefined && fresh === undefined) return undefined;
+          if (fresh !== undefined) this.analyzerConfiguration = fresh;
+          const timeoutSignal = AbortSignal.timeout(ANALYSIS_TIMEOUT_MS);
+          return this.analyzerConfiguration.analyzer.analyze(
+            job.prompt,
+            this.options.getPatterns(),
+            AbortSignal.any([this.controller!.signal, timeoutSignal, coordinatorSignal]),
+          );
+        });
       } catch (error) {
         const normalized = normalizeError(error);
         if (

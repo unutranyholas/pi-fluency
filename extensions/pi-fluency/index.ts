@@ -659,7 +659,7 @@ function registerHandlers(pi: ExtensionAPI, dependencies: ResolvedDependencies):
           signal: attemptController.signal,
           abortGraceMs: 100,
           authorize: async () => {
-            const fresh = await store.getFreshPolicySnapshot(foregroundDeadline);
+            const fresh = await store.getFreshPolicySnapshot(foregroundDeadline, attemptController.signal);
             const sessionSnoozed = isSessionPracticeSnoozed(ctx, store, fresh.practice);
             checkPolicy = fresh;
             checkSessionSnoozed = sessionSnoozed;
@@ -688,7 +688,7 @@ function registerHandlers(pi: ExtensionAPI, dependencies: ResolvedDependencies):
           return { kind: "failure" };
         }
         successfulResult = outcome.result;
-        checkPolicy = await store.getFreshPolicySnapshot(foregroundDeadline);
+        checkPolicy = await store.getFreshPolicySnapshot(foregroundDeadline, attemptController.signal);
         checkSessionSnoozed = isSessionPracticeSnoozed(ctx, store, checkPolicy.practice);
         backgroundPolicy = checkPolicy;
         const revalidation = revalidateCoachingPolicy(

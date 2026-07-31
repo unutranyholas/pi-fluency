@@ -476,21 +476,34 @@ export class FluencyStore {
   }
 
   /** Read one stable authorization/configuration/generation snapshot without taking mutation lock. */
-  async getFreshPolicySnapshot(deadline: number): Promise<PracticePolicySnapshot> {
+  async getFreshPolicySnapshot(deadline: number, signal?: AbortSignal): Promise<PracticePolicySnapshot> {
     if (!Number.isFinite(deadline)) throw new Error("Invalid practice policy deadline");
     const deadlineError = (): Error => new Error("Practice policy read deadline exceeded");
+    const abortError = (): unknown => signal?.reason ?? new DOMException("Aborted", "AbortError");
     const readOptional = async (path: string): Promise<string | undefined> => {
+      signal?.throwIfAborted();
       const remaining = deadline - Date.now();
       if (remaining <= 0) throw deadlineError();
       let timer: ReturnType<typeof setTimeout> | undefined;
+      let onAbort: (() => void) | undefined;
       try {
+        const cancelled = signal === undefined
+          ? new Promise<never>(() => undefined)
+          : new Promise<never>((_resolve, reject) => {
+            onAbort = () => reject(abortError());
+            signal.addEventListener("abort", onAbort, { once: true });
+            if (signal.aborted) onAbort();
+          });
         const value = await Promise.race([
           FluencyStore.policyFileReader(path),
           new Promise<never>((_resolve, reject) => { timer = setTimeout(() => reject(deadlineError()), remaining); }),
+          cancelled,
         ]);
+        signal?.throwIfAborted();
         if (Date.now() >= deadline) throw deadlineError();
         return value;
       } catch (error) {
+        if (signal?.aborted) throw abortError();
         if (Date.now() >= deadline || (error instanceof Error && error.message === deadlineError().message)) {
           throw deadlineError();
         }
@@ -498,10 +511,12 @@ export class FluencyStore {
         throw error;
       } finally {
         if (timer !== undefined) clearTimeout(timer);
+        if (onAbort !== undefined) signal?.removeEventListener("abort", onAbort);
       }
     };
 
     while (Date.now() < deadline) {
+      signal?.throwIfAborted();
       const settingsFirst = await readOptional(this.settingsPath);
       const practiceFirst = await readOptional(this.practicePath);
       const generationFirst = await readOptional(this.historyGenerationPath);

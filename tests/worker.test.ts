@@ -250,6 +250,40 @@ describe("FluencyWorker", () => {
     expect(getAnalyzerConfiguration).toHaveBeenCalledTimes(3);
   });
 
+  it("defers cross-store background authorization until coordinator ownership", async () => {
+    const coordinator = new AnalyzerCoordinator();
+    const foregroundResult = createDeferred<AnalysisResult>();
+    const foregroundAnalyzer: Analyzer = { analyze: vi.fn(() => foregroundResult.promise) };
+    const backgroundAnalyzer: Analyzer = { analyze: vi.fn().mockResolvedValue(emptyResult) };
+    let authorized = true;
+    const getAnalyzerConfiguration = vi.fn(() => authorized
+      ? { fingerprint: "authorized", analyzer: backgroundAnalyzer }
+      : undefined);
+    const worker = makeWorker({ coordinator, getAnalyzerConfiguration });
+
+    const foreground = worker.analyzeForeground({
+      analyzer: foregroundAnalyzer,
+      prompt: prompt("active-foreground"),
+      patterns: [],
+      deadline: Date.now() + 1_000,
+    });
+    await vi.waitFor(() => expect(foregroundAnalyzer.analyze).toHaveBeenCalledOnce());
+
+    worker.enqueue(prompt("queued-background"));
+    const draining = worker.drain();
+    await Promise.resolve();
+    expect(getAnalyzerConfiguration).not.toHaveBeenCalled();
+
+    // Represents another store/process durably pausing analytics while this job is queued.
+    authorized = false;
+    foregroundResult.resolve(emptyResult);
+    await expect(foreground).resolves.toEqual({ kind: "success", result: emptyResult });
+    await draining;
+
+    expect(getAnalyzerConfiguration).toHaveBeenCalledOnce();
+    expect(backgroundAnalyzer.analyze).not.toHaveBeenCalled();
+  });
+
   it("revalidates foreground authorization after coordinator wait before provider call", async () => {
     const coordinator = new AnalyzerCoordinator();
     const background = createDeferred<AnalysisResult>();
