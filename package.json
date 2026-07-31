@@ -1,6 +1,6 @@
 {
   "name": "pi-fluency",
-  "version": "0.1.3",
+  "version": "0.2.0",
   "description": "English writing analytics for human-authored Pi prompts",
   "author": "Ihar Trafimovich",
   "type": "module",
