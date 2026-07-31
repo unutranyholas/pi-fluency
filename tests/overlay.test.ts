@@ -634,6 +634,42 @@ describe("FluencyOverlay actions", () => {
     await write;
   });
 
+  it.each([
+    { name: "Esc", input: "\u001b", acceptedAction: "close" },
+    { name: "Tab", input: "\t", acceptedAction: "view:inbox" },
+  ])("freezes $name while Stats rule persistence is pending", async ({ input, acceptedAction }) => {
+    const stats = {
+      ...emptyStats,
+      rules: [{
+        patternId: "private", rowKey: "row", explanation: "Pending rule",
+        memberPatternKeys: ["private.key"], accepted: 1, ratePerThousand: 1,
+        sparkline: "▁▁▁▁▁▁▁", trend: "stable" as const,
+      }],
+      trendCounts: { improving: 0, worsening: 0, stable: 1, new: 0 },
+    };
+    let release!: () => void;
+    const pending = new Promise<void>((resolve) => { release = resolve; });
+    const fixture = makeOverlay({
+      initialView: "stats", stats, rows: 60,
+      practice: { settings: { ...DEFAULT_PRACTICE_SETTINGS, consentedAt: 1, targets: [] }, targets: [], sessionSnoozed: false, now: 1 },
+      overrides: { setPracticeTarget: () => pending },
+    });
+
+    const write = fixture.overlay.handleInput(" ");
+    await Promise.resolve();
+    const rendersWhilePending = fixture.tui.requestRender.mock.calls.length;
+    await fixture.overlay.handleInput(input);
+
+    expect(fixture.actions).toEqual([]);
+    expect(plain(fixture.overlay.render(80)).join("\n")).toContain("Pi Fluency · Stats");
+    release();
+    await write;
+    expect(fixture.tui.requestRender.mock.calls.length).toBeGreaterThan(rendersWhilePending);
+
+    await fixture.overlay.handleInput(input);
+    expect(fixture.actions).toContain(acceptedAction);
+  });
+
   it("preserves focused row keys across order changes and clamps when focused rows disappear", async () => {
     const rule = (rowKey: string, explanation: string) => ({
       patternId: `private-${rowKey}`, rowKey, explanation, memberPatternKeys: [`private.${rowKey}`],

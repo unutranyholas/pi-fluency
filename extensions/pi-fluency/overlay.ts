@@ -378,6 +378,7 @@ export class FluencyOverlay implements Component {
   async handleInput(data: string): Promise<void> {
     const callbacks = this.callbacks;
     if (this.disposed || !callbacks) return;
+    if (this.statsRulePending) return;
     const items = this.items();
 
     if (callbacks.keybindings.matches(data, "tui.select.cancel")) {
