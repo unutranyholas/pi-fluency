@@ -4,6 +4,7 @@ export const SETTINGS_SCHEMA_VERSION = 3 as const;
 export const HISTORY_SCHEMA_VERSION = 4 as const;
 export const SCHEMA_VERSION = SETTINGS_SCHEMA_VERSION;
 export const ANALYSIS_SCHEMA_VERSION = 3 as const;
+export const PRACTICE_SCHEMA_VERSION = 1 as const;
 
 export interface CollectedPrompt {
   promptHash: string;
@@ -121,6 +122,34 @@ export const DEFAULT_SETTINGS: FluencySettings = {
   retentionLimit: 500,
   ignoredPatternKeys: [],
   ignoredCategories: [],
+};
+
+export interface PracticeTarget {
+  explanation: string;
+  memberPatternKeys: string[];
+}
+
+export interface PracticeSettings {
+  schemaVersion: typeof PRACTICE_SCHEMA_VERSION;
+  revision: number;
+  epoch: number;
+  enabled: boolean;
+  consentedAt?: number;
+  targets: PracticeTarget[];
+  snoozedUntil?: number;
+}
+
+export interface PracticePolicySnapshot {
+  settings: FluencySettings;
+  practice: PracticeSettings;
+}
+
+export const DEFAULT_PRACTICE_SETTINGS: PracticeSettings = {
+  schemaVersion: PRACTICE_SCHEMA_VERSION,
+  revision: 0,
+  epoch: 0,
+  enabled: false,
+  targets: [],
 };
 
 type HistoryEventBase = { schemaVersion: typeof HISTORY_SCHEMA_VERSION; at: number };

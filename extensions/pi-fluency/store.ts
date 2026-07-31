@@ -1,10 +1,11 @@
 import { randomUUID } from "node:crypto";
-import { appendFile, chmod, mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { appendFile, chmod, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { lock, type LockOptions } from "proper-lockfile";
 import {
   DEFAULT_SETTINGS,
   HISTORY_SCHEMA_VERSION,
+  PRACTICE_SCHEMA_VERSION,
   SCHEMA_VERSION,
   type AnalysisResult,
   type CollectedPrompt,
@@ -13,6 +14,9 @@ import {
   type FluencySettings,
   type FluencyState,
   type MistakePattern,
+  type PracticePolicySnapshot,
+  type PracticeSettings,
+  type PracticeTarget,
   type ReviewPattern,
 } from "./types.js";
 import {
@@ -40,6 +44,13 @@ import {
   decodeHistoryGenerationMarker,
   encodeHistoryGenerationMarker,
 } from "./generation-marker.js";
+import {
+  FIVE_HOURS_MS,
+  canonicalizePracticeTargets,
+  copyPracticeSettings,
+  decodePracticeSettings,
+  defaultPracticeSettings,
+} from "./practice-settings.js";
 
 const HISTORY_SCHEMA_WARNING = "History migration required; run /fluency clear";
 const HISTORY_GENERATION_FILE = "history-generation";
@@ -57,6 +68,7 @@ const LOCK_RETRIES = {
 
 type LockProvider = (file: string, options: LockOptions) => Promise<() => Promise<void>>;
 type FileReplacer = (temporary: string, destination: string) => Promise<void>;
+type PolicyFileReader = (path: string) => Promise<string>;
 
 const errantCategorySet = new Set<string>(ERRANT_CATEGORIES);
 
@@ -118,7 +130,9 @@ function decodeSettings(value: unknown): FluencySettings {
 export class FluencyStore {
   private static lockProvider: LockProvider = lock;
   private static settingsFileReplacer: FileReplacer = rename;
+  private static practiceFileReplacer: FileReplacer = rename;
   private static historyFileReplacer: FileReplacer = rename;
+  private static policyFileReader: PolicyFileReader = (path) => readFile(path, "utf8");
 
   private readonly state = createFluencyState();
   private readonly warnings: string[] = [];
@@ -127,12 +141,14 @@ export class FluencyStore {
   private eventsSinceCompact = 0;
   private historyResetRequired = false;
   private settings: FluencySettings = copySettings(DEFAULT_SETTINGS);
+  private practice: PracticeSettings = defaultPracticeSettings();
   private mutationQueue: Promise<void> = Promise.resolve();
 
   private constructor(
     private readonly rootDir: string,
     private readonly historyPath: string,
     private readonly settingsPath: string,
+    private readonly practicePath: string,
     private readonly historyGenerationPath: string,
   ) {}
 
@@ -143,6 +159,7 @@ export class FluencyStore {
       rootDir,
       join(rootDir, "history.jsonl"),
       join(rootDir, "settings.json"),
+      join(rootDir, "practice.json"),
       join(rootDir, HISTORY_GENERATION_FILE),
     );
     await store.withGlobalLock(async (signal) => {
@@ -169,10 +186,11 @@ export class FluencyStore {
 
   requiresHistoryReset(): boolean { return this.historyResetRequired; }
   getSettings(): FluencySettings { return copySettings(this.settings); }
+  getPracticeSettings(): PracticeSettings { return copyPracticeSettings(this.practice); }
   getWarnings(): string[] { return [...this.warnings]; }
 
   private async hardenExistingFiles(): Promise<void> {
-    for (const path of [this.historyPath, this.settingsPath, this.historyGenerationPath]) {
+    for (const path of [this.historyPath, this.settingsPath, this.practicePath, this.historyGenerationPath]) {
       try {
         await chmod(path, PRIVATE_FILE_MODE);
       } catch (error) {
@@ -291,6 +309,18 @@ export class FluencyStore {
       this.settings = copySettings(DEFAULT_SETTINGS);
       if ((error as NodeJS.ErrnoException).code !== "ENOENT" && recordWarnings) {
         this.warnings.push("Could not read settings; defaults loaded");
+      }
+    }
+
+    try {
+      const parsed = JSON.parse(await readFile(this.practicePath, { encoding: "utf8", signal })) as unknown;
+      signal.throwIfAborted();
+      this.practice = decodePracticeSettings(parsed);
+    } catch (error) {
+      signal.throwIfAborted();
+      this.practice = defaultPracticeSettings();
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT" && recordWarnings) {
+        this.warnings.push("Could not read practice settings; defaults loaded");
       }
     }
 
@@ -421,6 +451,139 @@ export class FluencyStore {
       ignoredPatternKeys: settings.ignoredPatternKeys.filter((value) => !patternKeys.has(value)),
       ignoredCategories: settings.ignoredCategories.filter((value) => !categories.has(value)),
     }));
+  }
+
+  /** Read one stable settings/practice pair without taking the mutation lock. */
+  async getFreshPolicySnapshot(deadline: number): Promise<PracticePolicySnapshot> {
+    if (!Number.isFinite(deadline)) throw new Error("Invalid practice policy deadline");
+    const readOptional = async (path: string): Promise<string | undefined> => {
+      if (Date.now() >= deadline) throw new Error("Practice policy read deadline exceeded");
+      try {
+        const value = await FluencyStore.policyFileReader(path);
+        if (Date.now() >= deadline) throw new Error("Practice policy read deadline exceeded");
+        return value;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+        throw error;
+      }
+    };
+
+    while (Date.now() < deadline) {
+      const settingsFirst = await readOptional(this.settingsPath);
+      const practiceFirst = await readOptional(this.practicePath);
+      const settingsSecond = await readOptional(this.settingsPath);
+      const practiceSecond = await readOptional(this.practicePath);
+      if (settingsFirst !== settingsSecond || practiceFirst !== practiceSecond) continue;
+
+      let settings = copySettings(DEFAULT_SETTINGS);
+      let practice = defaultPracticeSettings();
+      try {
+        if (settingsSecond !== undefined) settings = decodeSettings(JSON.parse(settingsSecond) as unknown);
+      } catch { /* A corrupt complete file has safe effective defaults. */ }
+      try {
+        if (practiceSecond !== undefined) practice = decodePracticeSettings(JSON.parse(practiceSecond) as unknown);
+      } catch { /* A corrupt complete file has safe effective defaults. */ }
+      return { settings: copySettings(settings), practice: copyPracticeSettings(practice) };
+    }
+    throw new Error("Practice policy read deadline exceeded");
+  }
+
+  private updatePractice(
+    mutator: (practice: PracticeSettings) => PracticeSettings,
+  ): Promise<void> {
+    return this.enqueueMutation(async (signal) => {
+      await this.savePracticeUnsafe(mutator(copyPracticeSettings(this.practice)), signal);
+    });
+  }
+
+  recordPracticeConsent(consentedAt: number): Promise<void> {
+    return this.updatePractice((practice) => ({
+      ...practice,
+      revision: practice.revision + 1,
+      consentedAt,
+    }));
+  }
+
+  setPracticeEnabled(enabled: boolean): Promise<void> {
+    return this.updatePractice((practice) => ({
+      ...practice,
+      revision: practice.revision + 1,
+      enabled,
+    }));
+  }
+
+  setPracticeTarget(target: PracticeTarget, selected: boolean): Promise<void> {
+    let canonicalTarget: PracticeTarget;
+    try {
+      canonicalTarget = canonicalizePracticeTargets([target])[0]!;
+    } catch (error) {
+      return Promise.reject(error);
+    }
+    return this.updatePractice((practice) => {
+      const remaining = practice.targets.filter((item) => item.explanation !== canonicalTarget.explanation);
+      const targets = canonicalizePracticeTargets(selected ? [...remaining, canonicalTarget] : remaining);
+      return { ...practice, revision: practice.revision + 1, targets };
+    });
+  }
+
+  /** Revision/deadline-fenced modal action. False means no sidecar replacement occurred. */
+  snoozePracticeForFiveHours(
+    expectedRevision: number,
+    operationDeadline: number,
+    now = Date.now(),
+  ): Promise<boolean> {
+    if (!Number.isFinite(operationDeadline) || !Number.isFinite(now) || now < 0) {
+      return Promise.reject(new Error("Invalid practice snooze"));
+    }
+    return this.enqueueMutation(async (signal) => {
+      if (Date.now() >= operationDeadline || this.practice.revision !== expectedRevision) return false;
+      return this.savePracticeUnsafe({
+        ...this.practice,
+        revision: this.practice.revision + 1,
+        snoozedUntil: now + FIVE_HOURS_MS,
+      }, signal, operationDeadline);
+    });
+  }
+
+  resumePractice(): Promise<void> {
+    return this.updatePractice((practice) => {
+      const { snoozedUntil: _snoozedUntil, ...rest } = practice;
+      return { ...rest, revision: practice.revision + 1 };
+    });
+  }
+
+  resetPractice(): Promise<void> {
+    return this.updatePractice((practice) => ({
+      schemaVersion: PRACTICE_SCHEMA_VERSION,
+      revision: practice.revision + 1,
+      epoch: practice.epoch + 1,
+      enabled: false,
+      targets: [],
+    }));
+  }
+
+  private async savePracticeUnsafe(
+    practice: PracticeSettings,
+    signal: AbortSignal,
+    operationDeadline?: number,
+  ): Promise<boolean> {
+    const copied = decodePracticeSettings(practice);
+    const temporary = `${this.practicePath}.${process.pid}.${randomUUID()}.tmp`;
+    signal.throwIfAborted();
+    await writeFile(temporary, `${JSON.stringify(copied, null, 2)}\n`, {
+      encoding: "utf8",
+      mode: PRIVATE_FILE_MODE,
+      signal,
+    });
+    signal.throwIfAborted();
+    if (operationDeadline !== undefined && Date.now() >= operationDeadline) {
+      await rm(temporary, { force: true });
+      return false;
+    }
+    await FluencyStore.practiceFileReplacer(temporary, this.practicePath);
+    signal.throwIfAborted();
+    this.practice = copied;
+    return true;
   }
 
   updateSettings(

@@ -155,6 +155,91 @@ describe("FluencyStore concurrency", () => {
     expect(store.listInbox()[0]?.occurrenceCount).toBe(2);
   });
 
+  it("merges concurrent practice target mutations without settings-v3 interference", async () => {
+    const left = await FluencyStore.open(root);
+    const right = await FluencyStore.open(root);
+    await Promise.all([
+      left.setPracticeTarget({ explanation: "Article rule", memberPatternKeys: ["det.article"] }, true),
+      right.setPracticeTarget({ explanation: "Agreement rule", memberPatternKeys: ["verb.agreement"] }, true),
+    ]);
+
+    const practiceBeforeOldWriter = (await FluencyStore.open(root)).getPracticeSettings();
+    await writeFile(join(root, "settings.json"), JSON.stringify({
+      ...DEFAULT_SETTINGS,
+      enabled: true,
+      modelId: "old-extension-write",
+    }));
+    const reopened = await FluencyStore.open(root);
+    expect(reopened.getPracticeSettings()).toEqual(practiceBeforeOldWriter);
+    expect(reopened.getPracticeSettings().targets.map((target) => target.explanation)).toEqual([
+      "Agreement rule",
+      "Article rule",
+    ]);
+  });
+
+  it("retries an optimistic policy read when settings changes between sidecar reads", async () => {
+    const store = await FluencyStore.open(root);
+    const other = await FluencyStore.open(root);
+    await other.setPracticeTarget({ explanation: "Fresh rule", memberPatternKeys: ["fresh.rule"] }, true);
+
+    type PolicyFileReader = (path: string) => Promise<string>;
+    const storeClass = FluencyStore as unknown as { policyFileReader: PolicyFileReader };
+    const originalReader = storeClass.policyFileReader;
+    let replaced = false;
+    storeClass.policyFileReader = async (path) => {
+      if (!replaced && path.endsWith("practice.json")) {
+        replaced = true;
+        await writeFile(join(root, "settings.json"), JSON.stringify({
+          ...DEFAULT_SETTINGS,
+          enabled: true,
+          provider: "fresh-provider",
+          modelId: "fresh-model",
+          ignoredPatternKeys: ["fresh.ignore"],
+        }));
+      }
+      return readFile(path, "utf8");
+    };
+
+    try {
+      const snapshot = await store.getFreshPolicySnapshot(Date.now() + 1_000);
+      expect(snapshot.settings).toMatchObject({
+        enabled: true,
+        provider: "fresh-provider",
+        modelId: "fresh-model",
+        ignoredPatternKeys: ["fresh.ignore"],
+      });
+      expect(snapshot.practice.targets).toEqual([
+        { explanation: "Fresh rule", memberPatternKeys: ["fresh.rule"] },
+      ]);
+      expect(store.getSettings()).toEqual(DEFAULT_SETTINGS);
+      expect(store.getPracticeSettings().targets).toEqual([]);
+    } finally {
+      storeClass.policyFileReader = originalReader;
+    }
+  });
+
+  it("does not activate a snooze when lock acquisition finishes after its deadline", async () => {
+    const store = await FluencyStore.open(root);
+    const practicePath = join(root, "practice.json");
+    await store.setPracticeEnabled(true);
+    const before = await readFile(practicePath, "utf8");
+
+    type LockProvider = (file: string, options: LockOptions) => Promise<() => Promise<void>>;
+    const storeClass = FluencyStore as unknown as { lockProvider: LockProvider };
+    const originalProvider = storeClass.lockProvider;
+    storeClass.lockProvider = async () => {
+      await delay(30);
+      return async () => undefined;
+    };
+    try {
+      await expect(store.snoozePracticeForFiveHours(1, Date.now() + 5)).resolves.toBe(false);
+      expect(await readFile(practicePath, "utf8")).toBe(before);
+      expect(store.getPracticeSettings()).not.toHaveProperty("snoozedUntil");
+    } finally {
+      storeClass.lockProvider = originalProvider;
+    }
+  });
+
   it("releases filesystem lock after a thrown mutation", async () => {
     const store = await FluencyStore.open(root);
     await store.appendAnalysis(collected("before-read-error", 100), result);
