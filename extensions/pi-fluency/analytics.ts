@@ -46,6 +46,7 @@ export interface FluencyAnalytics {
   currentRatePerThousand?: number;
   periodRatePerThousand?: number;
   toolbarSparkline: string;
+  dailyRateSparkline: string;
   englishWords: number;
   accepted: number;
   dismissed: number;
@@ -276,6 +277,11 @@ export function computeFluencyAnalytics(input: AnalyticsInput): FluencyAnalytics
     const window = totals(end, 7);
     return ratePerThousand(window.accepted, window.words);
   });
+  const dailyRates = Array.from({ length: TREND_DAYS }, (_, index) => {
+    const date = shiftDate(today, index - (TREND_DAYS - 1));
+    const day = totals(date, 1);
+    return ratePerThousand(day.accepted, day.words);
+  });
   const currentSeven = totals(today, 7);
   const currentThirty = totals(today, TREND_DAYS);
   const previousEnd = shiftDate(today, -TREND_DAYS);
@@ -376,6 +382,7 @@ export function computeFluencyAnalytics(input: AnalyticsInput): FluencyAnalytics
     ...(currentRatePerThousand === undefined ? {} : { currentRatePerThousand }),
     ...(periodRatePerThousand === undefined ? {} : { periodRatePerThousand }),
     toolbarSparkline: renderSparkline(trailingRates),
+    dailyRateSparkline: renderSparkline(dailyRates),
     englishWords: currentThirty.words,
     accepted: currentThirty.accepted,
     dismissed: currentThirty.dismissed,

@@ -46,6 +46,7 @@ export const emptyStats: FluencyAnalytics = {
   periodPendingOccurrences: 0,
   activeRules: 0,
   toolbarSparkline: "·······",
+  dailyRateSparkline: "·".repeat(30),
   englishWords: 0,
   accepted: 0,
   dismissed: 0,

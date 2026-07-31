@@ -181,6 +181,65 @@ describe("computeFluencyAnalytics", () => {
     expect(result).toMatchObject({ englishWords: 1_000, accepted: 9 });
   });
 
+  it("renders a thirty-position daily rate chart without changing seven-position toolbar history", () => {
+    const result = computeFluencyAnalytics({
+      observations: [observation(0, 100)],
+      occurrences: [occurrence("today", "a", 0, "accepted")],
+      patterns: [pattern("a")],
+      ignoredPatternKeys: new Set(),
+      ignoredCategories: new Set(),
+      now: NOW,
+    });
+
+    expect(result.dailyRateSparkline).toHaveLength(30);
+    expect(result.dailyRateSparkline[0]).toBe("·");
+    expect(result.dailyRateSparkline.at(-1)).not.toBe("·");
+    expect(result.toolbarSparkline).toHaveLength(7);
+  });
+
+  it("includes oldest and current daily boundaries while excluding 31 days ago", () => {
+    const result = computeFluencyAnalytics({
+      observations: [observation(-31, 100), observation(-29, 100), observation(0, 100)],
+      occurrences: [
+        ...repeated("outside", 100, "a", -31, "accepted"),
+        occurrence("oldest", "a", -29, "accepted"),
+        occurrence("current", "a", 0, "accepted"),
+      ],
+      patterns: [pattern("a")],
+      ignoredPatternKeys: new Set(),
+      ignoredCategories: new Set(),
+      now: NOW,
+    });
+
+    expect(result.dailyRateSparkline).toBe(`▄${"·".repeat(28)}▄`);
+  });
+
+  it("renders word-bearing zero-accepted days as bars and no-word gaps as dots", () => {
+    const result = computeFluencyAnalytics({
+      observations: [observation(-10, 100)],
+      occurrences: [],
+      patterns: [],
+      ignoredPatternKeys: new Set(),
+      ignoredCategories: new Set(),
+      now: NOW,
+    });
+
+    expect(result.dailyRateSparkline).toBe(`${"·".repeat(19)}▁${"·".repeat(10)}`);
+  });
+
+  it("renders an empty thirty-day daily rate period as dots", () => {
+    const result = computeFluencyAnalytics({
+      observations: [],
+      occurrences: [],
+      patterns: [],
+      ignoredPatternKeys: new Set(),
+      ignoredCategories: new Set(),
+      now: NOW,
+    });
+
+    expect(result.dailyRateSparkline).toBe("·".repeat(30));
+  });
+
   it("uses seven local-date trailing windows and renders no denominator as dots", () => {
     const observations = Array.from({ length: 13 }, (_, index) => observation(index - 12, 100));
     const result = computeFluencyAnalytics({

@@ -527,6 +527,7 @@ describe("FluencyOverlay actions", () => {
         periodPendingOccurrences: 0,
         activeRules: 1,
         toolbarSparkline: "·······",
+        dailyRateSparkline: "·".repeat(30),
         englishWords: 100,
         accepted: 2,
         dismissed: 0,

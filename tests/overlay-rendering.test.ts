@@ -21,6 +21,7 @@ describe("FluencyOverlay rendering", () => {
       currentRatePerThousand: 1.2,
       periodRatePerThousand: 8.4,
       toolbarSparkline: "▆▄▃▂▁▂▂",
+      dailyRateSparkline: "·".repeat(30),
       englishWords: 5_014,
       accepted: 42,
       dismissed: 9,
