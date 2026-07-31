@@ -7,6 +7,7 @@ import type { CoachingOverlay } from "../extensions/pi-fluency/coaching-overlay.
 import { createFluencyExtension, type OpenInbox } from "../extensions/pi-fluency/index.js";
 import { FluencyStore } from "../extensions/pi-fluency/store.js";
 import { DEFAULT_SETTINGS, type AnalysisResult } from "../extensions/pi-fluency/types.js";
+import { FluencyWorker, type ForegroundAnalysisOutcome } from "../extensions/pi-fluency/worker.js";
 import {
   assistantMessage,
   createExtensionHarness,
@@ -1202,11 +1203,42 @@ describe("Pi Fluency extension", () => {
 
     expect(await harness.emitInput("I made an mistake while overlay fails.")).toEqual({ action: "continue" });
     expect(harness.editorText).toBe("");
-    expect(harness.notifications.at(-1)?.message).toBe("Sent without practice check — analyzer busy/timed out/failed.");
+    expect(harness.notifications.at(-1)?.message).toBe("Sent without practice check — analyzer failed.");
     expect((await FluencyStore.open(harness.deps.rootDir)).getAnalyticsSnapshot().observations).toEqual([]);
   });
 
-  it("fails open after foreground timeout through public extension seam", async () => {
+  it("allows a successful practice check after 6.1 seconds", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(20_000);
+    const clean: AnalysisResult = { schemaVersion: 3, language: "en", mistakes: [], demonstratedFixes: [] };
+    const harness = await createExtensionHarness({ enabled: true });
+    let resolveAnalysis!: (result: AnalysisResult) => void;
+    harness.analyzer.analyze.mockImplementationOnce(() => new Promise((resolve) => { resolveAnalysis = resolve; }));
+    const store = await FluencyStore.open(harness.deps.rootDir);
+    await store.activatePractice(2, {
+      explanation: oneMistake.mistakes[0]!.explanation,
+      memberPatternKeys: [oneMistake.mistakes[0]!.patternKey],
+    });
+    const showCoaching = vi.fn(async (_ctx, check) => {
+      expect(await check).toEqual({ kind: "clean" });
+      return "send-once" as const;
+    });
+    try {
+      createFluencyExtension({ ...harness.deps, showCoaching })(harness.pi);
+      const input = harness.emitInput("I made an error that should still be checked.");
+      await vi.waitFor(() => expect(harness.analyzer.analyze).toHaveBeenCalledOnce());
+      await vi.advanceTimersByTimeAsync(6_100);
+      resolveAnalysis(clean);
+      await expect(input).resolves.toEqual({ action: "continue" });
+      expect(harness.notifications).not.toContainEqual(expect.objectContaining({
+        message: expect.stringContaining("timed out"),
+      }));
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("fails open after 12-second foreground timeout through public extension seam", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(20_000);
     const harness = await createExtensionHarness({ enabled: true, analyzerMode: "wait-for-abort" });
@@ -1223,12 +1255,77 @@ describe("Pi Fluency extension", () => {
       createFluencyExtension({ ...harness.deps, showCoaching })(harness.pi);
       const input = harness.emitInput("I made an mistake until foreground timeout.");
       await vi.waitFor(() => expect(harness.analyzer.analyze).toHaveBeenCalledOnce());
-      await vi.advanceTimersByTimeAsync(6_100);
+      await vi.advanceTimersByTimeAsync(12_100);
       expect(await input).toEqual({ action: "continue" });
       expect(harness.abortObserved).toBe(true);
-      expect(harness.notifications.at(-1)?.message).toBe("Sent without practice check — analyzer busy/timed out/failed.");
+      expect(harness.notifications.at(-1)?.message).toBe(
+        "Sent without practice check — analyzer timed out after 12 seconds.",
+      );
     } finally {
       vi.useRealTimers();
+    }
+  });
+
+  it.each([
+    [{ kind: "busy" }, "Sent without practice check — analyzer was busy for 12 seconds."],
+    [{ kind: "error", error: new Error("provider secret") }, "Sent without practice check — analyzer failed."],
+    [{ kind: "shutdown" }, "Sent without practice check — analyzer stopped during reload or shutdown."],
+    [{ kind: "quarantined" }, "Sent without practice check — analyzer unavailable; restart Pi to restore practice."],
+    [{ kind: "cancelled" }, "Sent without practice check — practice settings changed."],
+  ] as const)("reports foreground $kind outcome without provider details", async (outcome, message) => {
+    const harness = await createExtensionHarness({ enabled: true });
+    const store = await FluencyStore.open(harness.deps.rootDir);
+    await store.activatePractice(2, {
+      explanation: oneMistake.mistakes[0]!.explanation,
+      memberPatternKeys: [oneMistake.mistakes[0]!.patternKey],
+    });
+    const analyzeForeground = vi.spyOn(FluencyWorker.prototype, "analyzeForeground")
+      .mockResolvedValueOnce(outcome as ForegroundAnalysisOutcome);
+    const showCoaching = vi.fn(async (_ctx, check) => {
+      expect((await check).kind).toBe("failure");
+      return "technical-failure" as const;
+    });
+    try {
+      createFluencyExtension({ ...harness.deps, showCoaching })(harness.pi);
+      await expect(harness.emitInput("I made an mistake while the analyzer cannot check."))
+        .resolves.toEqual({ action: "continue" });
+      expect(harness.notifications.at(-1)?.message).toBe(message);
+      expect(harness.notifications.at(-1)?.message).not.toContain("provider secret");
+    } finally {
+      analyzeForeground.mockRestore();
+    }
+  });
+
+  it.each([
+    ["authorization", 2, 0],
+    ["post-analysis", 3, 1],
+  ] as const)("reports policy unavailable when %s policy read rejects", async (_phase, rejectedRead, providerCalls) => {
+    const harness = await createExtensionHarness({ enabled: true });
+    const store = await FluencyStore.open(harness.deps.rootDir);
+    await store.activatePractice(2, {
+      explanation: oneMistake.mistakes[0]!.explanation,
+      memberPatternKeys: [oneMistake.mistakes[0]!.patternKey],
+    });
+    const original = FluencyStore.prototype.getFreshPolicySnapshot;
+    let reads = 0;
+    const policyRead = vi.spyOn(FluencyStore.prototype, "getFreshPolicySnapshot").mockImplementation(function (this: FluencyStore, ...args) {
+      reads += 1;
+      if (reads === rejectedRead) return Promise.reject(new Error("private policy path"));
+      return original.apply(this, args);
+    });
+    const showCoaching = vi.fn(async (_ctx, check) => {
+      expect((await check).kind).toBe("failure");
+      return "technical-failure" as const;
+    });
+    try {
+      createFluencyExtension({ ...harness.deps, showCoaching })(harness.pi);
+      await expect(harness.emitInput("I made an mistake before policy read fails."))
+        .resolves.toEqual({ action: "continue" });
+      expect(harness.analyzer.analyze).toHaveBeenCalledTimes(providerCalls);
+      expect(harness.notifications.at(-1)?.message).toBe("Sent without practice check — policy unavailable.");
+      expect(harness.notifications.at(-1)?.message).not.toContain("private policy path");
+    } finally {
+      policyRead.mockRestore();
     }
   });
 
@@ -1245,6 +1342,7 @@ describe("Pi Fluency extension", () => {
     expect(await harness.emitInput("I made an mistake while checking is active.")).toEqual({ action: "continue" });
     expect(harness.abortObserved).toBe(false);
     expect(harness.analyzer.analyze).not.toHaveBeenCalled();
+    expect(harness.notifications.at(-1)?.message).toBe("Sent without practice check — analyzer cancelled.");
     expect(harness.editorText).toBe("");
     expect((await FluencyStore.open(harness.deps.rootDir)).getAnalyticsSnapshot().observations).toEqual([]);
   });

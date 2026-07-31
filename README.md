@@ -67,7 +67,7 @@ Useful commands:
 
 Practice is an optional analytical aid, not comprehensive grammar checking, automatic correction, or English instruction. Stats shows recurring rules as inline `[ ]` or `[x]` rows. First rule starts focused; use Up/Down or `j`/`k` to move focus and keep focused row in view, then press Space to toggle it. First Space records preflight consent, enables practice, and selects focused rule atomically; no separate consent prompt opens. This consent means eligible sanitized prompt prose may reach configured Fluency model before main request proceeds, including a draft you later keep instead of sending.
 
-For idle, text-only interactive prompts, Pi Fluency checks selected rules at submit time. This sends full sanitized prose from eligible prompt to analysis provider and can add provider latency, bounded to one attempt within about six seconds. Editor keeps exact text Pi Fluency received while check runs. Clean result proceeds normally. Match opens checkpoint without rewriting text:
+For idle, text-only interactive prompts, Pi Fluency checks selected rules at submit time. This sends full sanitized prose from eligible prompt to analysis provider and can add provider latency, bounded to one attempt with a maximum 12-second cap. Successful checks proceed immediately, and pressing `s` while checking bypasses the check. Editor keeps exact text Pi Fluency received while check runs. Clean result proceeds normally. Match opens checkpoint without rewriting text:
 
 - **Edit** or **Esc** blocks submission and leaves received text in editor.
 - **Send once** proceeds once and keeps practice active for later prompts.

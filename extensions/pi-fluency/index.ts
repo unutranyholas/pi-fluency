@@ -31,11 +31,23 @@ import { runSetup } from "./setup.js";
 import { formatStatus, type StatusErrorReason, type StatusState } from "./status.js";
 import { FluencyStore, type AnalysisCommitFence } from "./store.js";
 import type { FluencySettings, PracticeSettings } from "./types.js";
-import { FluencyWorker } from "./worker.js";
+import { FluencyWorker, type ForegroundAnalysisOutcome } from "./worker.js";
 
 const STATUS_KEY = "pi-fluency";
 const USAGE = "Usage: /fluency [pause|resume|status|model|clear|stats|practice [on|off|resume|reset]]";
 const PRACTICE_DISCLOSURE = "Before main submission, full sanitized draft goes to configured Fluency model and may be analyzed even if you later choose not to send it.";
+const PRACTICE_CHECK_TIMEOUT_MS = 12_000;
+
+function practiceFailureMessage(kind: Exclude<ForegroundAnalysisOutcome["kind"], "success">): string {
+  switch (kind) {
+    case "busy": return "Sent without practice check — analyzer was busy for 12 seconds.";
+    case "timeout": return "Sent without practice check — analyzer timed out after 12 seconds.";
+    case "error": return "Sent without practice check — analyzer failed.";
+    case "shutdown": return "Sent without practice check — analyzer stopped during reload or shutdown.";
+    case "quarantined": return "Sent without practice check — analyzer unavailable; restart Pi to restore practice.";
+    case "cancelled": return "Sent without practice check — practice settings changed.";
+  }
+}
 
 export interface OpenInboxOptions {
   signal: AbortSignal;
@@ -499,7 +511,7 @@ function registerHandlers(pi: ExtensionAPI, dependencies: ResolvedDependencies):
 
   pi.on("input", async (event, ctx) => {
     const handlerStartedAt = Date.now();
-    const foregroundDeadline = handlerStartedAt + 6_000;
+    const foregroundDeadline = handlerStartedAt + PRACTICE_CHECK_TIMEOUT_MS;
     if (shuttingDown || event.source !== "interactive") return;
     ctxRef = ctx;
     const collected = collectPrompt(event.text, dependencies.now());
@@ -646,7 +658,9 @@ function registerHandlers(pi: ExtensionAPI, dependencies: ResolvedDependencies):
     let checkPolicy = initialPolicy;
     let checkSessionSnoozed = initialSessionSnoozed;
     let analyzerChangeObserved = false;
-    let technicalFailureMessage = "Sent without practice check — analyzer busy/timed out/failed.";
+    let policyReadFailed = false;
+    let coachingUiFailed = false;
+    let technicalFailureMessage = practiceFailureMessage("error");
     const checkPromise: Promise<CoachingCheckResult> = (async () => {
       try {
         const context = selectPracticeAnalysisContext(initialPolicy.practice.targets, store.listKnownPatterns());
@@ -659,17 +673,26 @@ function registerHandlers(pi: ExtensionAPI, dependencies: ResolvedDependencies):
           signal: attemptController.signal,
           abortGraceMs: 100,
           authorize: async () => {
-            const fresh = await store.getFreshPolicySnapshot(foregroundDeadline, attemptController.signal);
+            let fresh;
+            try {
+              fresh = await store.getFreshPolicySnapshot(foregroundDeadline, attemptController.signal);
+            } catch (error) {
+              policyReadFailed = true;
+              technicalFailureMessage = "Sent without practice check — policy unavailable.";
+              throw error;
+            }
             const sessionSnoozed = isSessionPracticeSnoozed(ctx, store, fresh.practice);
             checkPolicy = fresh;
             checkSessionSnoozed = sessionSnoozed;
             backgroundPolicy = fresh;
-            return revalidateCoachingPolicy(
+            const revalidation = revalidateCoachingPolicy(
               initialPolicy,
               fresh,
               initialSessionSnoozed,
               sessionSnoozed,
-            ) === "unchanged"
+            );
+            if (revalidation === "analytics-disabled") backgroundAllowed = false;
+            return revalidation === "unchanged"
               && isCoachingEligible({
                 source: event.source,
                 idle: true,
@@ -682,13 +705,16 @@ function registerHandlers(pi: ExtensionAPI, dependencies: ResolvedDependencies):
           },
         });
         if (outcome.kind !== "success") {
-          if (outcome.kind === "quarantined") {
-            technicalFailureMessage = "Sent without practice check — analyzer unavailable; restart Pi to restore practice.";
-          }
+          if (!policyReadFailed && !coachingUiFailed) technicalFailureMessage = practiceFailureMessage(outcome.kind);
           return { kind: "failure" };
         }
         successfulResult = outcome.result;
-        checkPolicy = await store.getFreshPolicySnapshot(foregroundDeadline, attemptController.signal);
+        try {
+          checkPolicy = await store.getFreshPolicySnapshot(foregroundDeadline, attemptController.signal);
+        } catch {
+          technicalFailureMessage = "Sent without practice check — policy unavailable.";
+          return { kind: "failure" };
+        }
         checkSessionSnoozed = isSessionPracticeSnoozed(ctx, store, checkPolicy.practice);
         backgroundPolicy = checkPolicy;
         const revalidation = revalidateCoachingPolicy(
@@ -773,6 +799,7 @@ function registerHandlers(pi: ExtensionAPI, dependencies: ResolvedDependencies):
         persistSnooze,
       );
     } catch {
+      coachingUiFailed = true;
       decision = "technical-failure";
     }
     if (decision === "edit") {
