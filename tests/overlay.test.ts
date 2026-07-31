@@ -352,6 +352,38 @@ describe("FluencyOverlay actions", () => {
     expect(plain(ignored.overlay.render(60))).toContain(" No ignored patterns.");
   });
 
+  it("bounds long mutation errors after retaining control-character sanitization", async () => {
+    const longMessage = `failed\u001b[31m\n${"x".repeat(2_000)}tail-secret`;
+    const stats = {
+      ...emptyStats,
+      rules: [{
+        patternId: "hidden", rowKey: "row", explanation: "First rule",
+        memberPatternKeys: ["hidden.key"], accepted: 2, ratePerThousand: 2,
+        sparkline: "▁▁▁▁▁▁▁", trend: "stable" as const,
+      }],
+      trendCounts: { improving: 0, worsening: 0, stable: 1, new: 0 },
+    };
+    const state = makeOverlay({
+      initialView: "stats",
+      rows: 200,
+      stats,
+      practice: {
+        settings: { ...DEFAULT_PRACTICE_SETTINGS, consentedAt: 1, targets: [] },
+        targets: [],
+        sessionSnoozed: false,
+        now: 1,
+      },
+      overrides: { setPracticeTarget: async () => { throw new Error(longMessage); } },
+    });
+
+    await state.overlay.handleInput(" ");
+    const text = plain(state.overlay.render(80)).join("\n");
+    expect(text.replace(/\s+/g, " ")).toContain("Action failed: failed?[31m?");
+    expect(text).toContain("…");
+    expect(text).not.toContain("tail-secret");
+    expect((text.match(/x/g) ?? []).length).toBeLessThanOrEqual(200);
+  });
+
   it("keeps failed unignore in ignored view", async () => {
     const exact = { kind: "pattern" as const, value: "grammar.articles.first" };
     const fixture = makeOverlay({

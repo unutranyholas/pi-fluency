@@ -77,6 +77,7 @@ const HEADER_LINES = 2;
 const FOOTER_LINES = 3;
 const BORDER_LINES = 2;
 const DETAIL_SCROLL_STEP = 5;
+const MAX_ERROR_LENGTH = 200;
 
 interface StatsRuleRow {
   rowKey: string;
@@ -174,7 +175,10 @@ export function wrapCompactDiff(lines: string[], marker: string, width: number):
 
 function sanitizedError(error: unknown): string {
   const message = error instanceof Error ? error.message : String(error);
-  return message.replace(/[\u0000-\u001f\u007f-\u009f]/g, "?").trim() || "Unknown error";
+  const sanitized = message.replace(/[\u0000-\u001f\u007f-\u009f]/g, "?").trim() || "Unknown error";
+  return sanitized.length <= MAX_ERROR_LENGTH
+    ? sanitized
+    : `${sanitized.slice(0, MAX_ERROR_LENGTH - 1)}…`;
 }
 
 /** Disposable keyboard-first inbox used inside Pi custom overlay lifecycle. */
@@ -530,7 +534,7 @@ export class FluencyOverlay implements Component {
   private verticalBudget(): number {
     const rows = this.callbacks?.tui.terminal?.rows;
     if (typeof rows !== "number" || !Number.isFinite(rows) || rows <= 0) return FALLBACK_VERTICAL_BUDGET;
-    return Math.max(HEADER_LINES + FOOTER_LINES + BORDER_LINES + 1, Math.min(Math.floor(rows * 0.8), rows - 2));
+    return Math.max(HEADER_LINES + FOOTER_LINES + BORDER_LINES + 1, Math.min(Math.floor(rows * 0.8) + 1, rows - 2));
   }
 
   private visiblePatternLines(pattern: ReviewPattern, width: number, available: number): string[] {
@@ -666,12 +670,28 @@ export class FluencyOverlay implements Component {
     return body.lines.slice(this.detailOffset, this.detailOffset + available);
   }
 
-  private footerLines(contentWidth: number): string[] {
+  private practiceStatus(practice?: PracticeOverlayState): string | undefined {
+    if (!practice) return undefined;
+    if (!practice.settings.enabled) return " Practice off · selected rules not checked";
+    const globalSnoozed = (practice.settings.snoozedUntil ?? 0) > practice.now;
+    if (practice.sessionSnoozed && globalSnoozed) {
+      return " Session + global snooze · selected rules not checked";
+    }
+    if (practice.sessionSnoozed) return " Session snooze · selected rules not checked";
+    if (globalSnoozed) return " Global snooze · selected rules not checked";
+    return " Practice on · selected rules checked before send";
+  }
+
+  private footerLines(contentWidth: number, practice?: PracticeOverlayState): string[] {
     if (this.view === "stats") {
-      const text = this.statsRulePending
+      const action = this.statsRulePending
         ? " Saving…   focus and toggle disabled"
         : " ↑↓/jk focus + scroll   Space toggle   tab view   esc close";
-      return wrapTextWithAnsi(text, Math.max(1, contentWidth));
+      const status = this.practiceStatus(practice);
+      return [
+        ...(status ? wrapTextWithAnsi(status, Math.max(1, contentWidth)) : []),
+        ...wrapTextWithAnsi(action, Math.max(1, contentWidth)),
+      ];
     }
     if (this.view === "inbox") return [" ←→ card  ↑↓/jk scroll  a accept  d dismiss", " i ignore  tab view  esc close"];
     return [" ←→ card  ↑↓/jk scroll", this.view === "ignored" ? " u restore all  tab view  esc close" : " i ignore  tab view  esc close"];
@@ -699,7 +719,7 @@ export class FluencyOverlay implements Component {
     const headerLines = combinedHeaderWidth <= contentWidth
       ? [title + " ".repeat(contentWidth - visibleWidth(title) - visibleWidth(paging)) + paging]
       : [title, ...wrapTextWithAnsi(` ${paging}`, contentWidth)];
-    const footerLines = this.footerLines(contentWidth);
+    const footerLines = this.footerLines(contentWidth, practice);
     const lines: string[] = [...headerLines, ` ${"─".repeat(Math.max(0, contentWidth - 2))}`];
 
     if (this.loadError) {

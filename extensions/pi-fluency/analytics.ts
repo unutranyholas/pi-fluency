@@ -83,6 +83,19 @@ export function renderSparkline(values: Array<number | undefined>): string {
   }).join("");
 }
 
+function renderDailyRateSparkline(values: Array<number | undefined>): string {
+  const finite = values.filter((value): value is number =>
+    typeof value === "number" && Number.isFinite(value));
+  if (finite.length === 0) return values.map(() => "·").join("");
+  const maximum = Math.max(...finite);
+  return values.map((value) => {
+    if (value === undefined || !Number.isFinite(value)) return "·";
+    if (maximum <= 0) return SPARK_GLYPHS[0]!;
+    const index = Math.round(value / maximum * (SPARK_GLYPHS.length - 1));
+    return SPARK_GLYPHS[Math.max(0, Math.min(SPARK_GLYPHS.length - 1, index))]!;
+  }).join("");
+}
+
 export function classifyRuleTrend(
   current: number | undefined,
   previous: number | undefined,
@@ -382,7 +395,7 @@ export function computeFluencyAnalytics(input: AnalyticsInput): FluencyAnalytics
     ...(currentRatePerThousand === undefined ? {} : { currentRatePerThousand }),
     ...(periodRatePerThousand === undefined ? {} : { periodRatePerThousand }),
     toolbarSparkline: renderSparkline(trailingRates),
-    dailyRateSparkline: renderSparkline(dailyRates),
+    dailyRateSparkline: renderDailyRateSparkline(dailyRates),
     englishWords: currentThirty.words,
     accepted: currentThirty.accepted,
     dismissed: currentThirty.dismissed,

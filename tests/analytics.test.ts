@@ -211,7 +211,27 @@ describe("computeFluencyAnalytics", () => {
       now: NOW,
     });
 
-    expect(result.dailyRateSparkline).toBe(`▄${"·".repeat(28)}▄`);
+    expect(result.dailyRateSparkline).toBe(`█${"·".repeat(28)}█`);
+  });
+
+  it("scales finite daily rates from zero while preserving dots and word-bearing zero days", () => {
+    const result = computeFluencyAnalytics({
+      observations: [
+        observation(-2, 100),
+        observation(-1, 100),
+        observation(0, 100),
+      ],
+      occurrences: [
+        occurrence("half-rate", "a", -2, "accepted"),
+        ...repeated("maximum-rate", 2, "a", -1, "accepted"),
+      ],
+      patterns: [pattern("a")],
+      ignoredPatternKeys: new Set(),
+      ignoredCategories: new Set(),
+      now: NOW,
+    });
+
+    expect(result.dailyRateSparkline).toBe(`${"·".repeat(27)}▅█▁`);
   });
 
   it("renders word-bearing zero-accepted days as bars and no-word gaps as dots", () => {

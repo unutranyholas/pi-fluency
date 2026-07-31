@@ -105,6 +105,99 @@ describe("FluencyOverlay rendering", () => {
     expect(rendered.every((line) => visibleWidth(line) === 40)).toBe(true);
   });
 
+  it.each([
+    {
+      name: "active",
+      settings: { enabled: true },
+      sessionSnoozed: false,
+      expected: "Practice on · selected rules checked before send",
+    },
+    {
+      name: "master off",
+      settings: { enabled: false },
+      sessionSnoozed: false,
+      expected: "Practice off · selected rules not checked",
+    },
+    {
+      name: "session snooze",
+      settings: { enabled: true },
+      sessionSnoozed: true,
+      expected: "Session snooze · selected rules not checked",
+    },
+    {
+      name: "global snooze",
+      settings: { enabled: true, snoozedUntil: 10_000 },
+      sessionSnoozed: false,
+      expected: "Global snooze · selected rules not checked",
+    },
+  ])("renders accurate selected-rule Stats status when $name", ({ settings, sessionSnoozed, expected }) => {
+    const explanation = "Use articles consistently.";
+    const target = { explanation, memberPatternKeys: ["hidden.key"] };
+    const stats: FluencyAnalytics = {
+      ...emptyStats,
+      rules: [{
+        patternId: "hidden", rowKey: "hidden-row", explanation,
+        memberPatternKeys: target.memberPatternKeys, accepted: 2, ratePerThousand: 2,
+        sparkline: "▁▁▁▁▁▁▁", trend: "stable",
+      }],
+      trendCounts: { improving: 0, worsening: 0, stable: 1, new: 0 },
+    };
+    const fixture = makeOverlay({
+      initialView: "stats",
+      stats,
+      practice: {
+        settings: {
+          ...DEFAULT_PRACTICE_SETTINGS,
+          consentedAt: 1,
+          targets: [target],
+          ...settings,
+        },
+        targets: [{
+          ...target,
+          rowKey: "hidden-row",
+          currentPatternKeys: ["hidden.key"],
+          coachingEnabled: true,
+        }],
+        sessionSnoozed,
+        now: 100,
+      },
+    });
+
+    const text = plain(fixture.overlay.render(80)).join("\n").replace(/\s+/g, " ");
+    expect(text).toContain("> [x] Use articles consistently.");
+    expect(text).toContain(expected);
+  });
+
+  it("keeps snoozed Stats status, selected checkbox, and actions visible in a compact terminal", () => {
+    const explanation = "Use articles consistently.";
+    const target = { explanation, memberPatternKeys: ["hidden.key"] };
+    const fixture = makeOverlay({
+      initialView: "stats",
+      rows: 15,
+      stats: {
+        ...emptyStats,
+        rules: [{
+          patternId: "hidden", rowKey: "hidden-row", explanation,
+          memberPatternKeys: target.memberPatternKeys, accepted: 2, ratePerThousand: 2,
+          sparkline: "▁▁▁▁▁▁▁", trend: "stable",
+        }],
+        trendCounts: { improving: 0, worsening: 0, stable: 1, new: 0 },
+      },
+      practice: {
+        settings: { ...DEFAULT_PRACTICE_SETTINGS, enabled: true, consentedAt: 1, targets: [target] },
+        targets: [{ ...target, rowKey: "hidden-row", currentPatternKeys: ["hidden.key"], coachingEnabled: true }],
+        sessionSnoozed: true,
+        now: 100,
+      },
+    });
+
+    const text = plain(fixture.overlay.render(40)).join("\n").replace(/\s+/g, " ");
+    expect(text).toContain("> [x]");
+    expect(text).toContain("Session snooze · selected rules not checked");
+    expect(text).toContain("Space toggle");
+    expect(text).toContain("esc close");
+  });
+
   it("scrolls long Stats vertically without horizontal card navigation resetting it", async () => {
     const rules = Array.from({ length: 20 }, (_, index) => ({
       patternId: `hidden-${index}`,

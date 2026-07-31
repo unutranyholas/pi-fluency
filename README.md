@@ -43,7 +43,7 @@ Requires Pi 0.80.10 or newer.
 pi install npm:pi-fluency
 ```
 
-Run `/reload`, then `/fluency`. Choose an available analysis model and confirm provider disclosure for background analytics. Analysis remains off until setup completes. Optional preflight practice stays off and has a separate disclosure when you first activate a target.
+Run `/reload`, then `/fluency`. Choose an available analysis model and confirm provider disclosure for background analytics. Analysis remains off until setup completes. Optional preflight practice stays off until first Space selection atomically records preflight consent, enables practice, and selects focused rule.
 
 Useful commands:
 
@@ -65,7 +65,7 @@ Useful commands:
 
 ## Practice selected rules
 
-Practice is an optional analytical aid, not comprehensive grammar checking, automatic correction, or English instruction. Stats shows recurring rules as inline `[ ]` or `[x]` rows. First rule starts focused; use Up/Down or `j`/`k` to move focus and keep focused row in view, then press Space to toggle it. First activation asks for separate preflight consent: eligible sanitized prompt prose may reach configured Fluency model before main request proceeds, including a draft you later keep instead of sending.
+Practice is an optional analytical aid, not comprehensive grammar checking, automatic correction, or English instruction. Stats shows recurring rules as inline `[ ]` or `[x]` rows. First rule starts focused; use Up/Down or `j`/`k` to move focus and keep focused row in view, then press Space to toggle it. First Space records preflight consent, enables practice, and selects focused rule atomically; no separate consent prompt opens. This consent means eligible sanitized prompt prose may reach configured Fluency model before main request proceeds, including a draft you later keep instead of sending.
 
 For idle, text-only interactive prompts, Pi Fluency checks selected rules at submit time. This sends full sanitized prose from eligible prompt to analysis provider and can add provider latency, bounded to one attempt within about six seconds. Editor keeps exact text Pi Fluency received while check runs. Clean result proceeds normally. Match opens checkpoint without rewriting text:
 
