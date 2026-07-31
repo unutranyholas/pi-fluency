@@ -72,7 +72,10 @@ function repeated(
   offset: number,
   decision: OccurrenceDecision,
 ): MistakeOccurrence[] {
-  return Array.from({ length: count }, (_, index) => occurrence(`${prefix}-${index}`, patternId, offset, decision));
+  return Array.from({ length: count }, (_, index) => ({
+    ...occurrence(`${prefix}-${index}`, patternId, offset, decision),
+    promptHash: `${prefix}-prompt-${index}`,
+  }));
 }
 
 describe("countEnglishWords", () => {
@@ -284,12 +287,12 @@ describe("computeFluencyAnalytics", () => {
     expect(inactive.rules.map((rule) => rule.explanation)).toEqual(["Rule a"]);
   });
 
-  it("promotes singleton pattern IDs that share one explanation into one recurring rule", () => {
+  it("promotes singleton pattern IDs that share one explanation across distinct prompts", () => {
     const result = computeFluencyAnalytics({
-      observations: [observation(0, 200)],
+      observations: [observation(0, 100), observation(-1, 100)],
       occurrences: [
         occurrence("first-shape", "a", 0, "accepted"),
-        occurrence("second-shape", "b", 0, "accepted"),
+        occurrence("second-shape", "b", -1, "accepted"),
       ],
       patterns: [pattern("a", "Shared article rule."), pattern("b", "Shared article rule.")],
       ignoredPatternKeys: new Set(),
@@ -302,6 +305,24 @@ describe("computeFluencyAnalytics", () => {
     expect(result.rules.map((rule) => [rule.explanation, rule.accepted])).toEqual([
       ["Shared article rule.", 2],
     ]);
+  });
+
+  it("keeps repeated accepted findings from one prompt in the one-off aggregate", () => {
+    const result = computeFluencyAnalytics({
+      observations: [observation(0, 200)],
+      occurrences: [
+        occurrence("first-shape", "a", 0, "accepted"),
+        occurrence("second-shape", "b", 0, "accepted"),
+      ],
+      patterns: [pattern("a", "Shared article rule."), pattern("b", "Shared article rule.")],
+      ignoredPatternKeys: new Set(),
+      ignoredCategories: new Set(),
+      now: NOW,
+    });
+
+    expect(result.activeRules).toBe(0);
+    expect(result.oneOffAccepted).toBe(2);
+    expect(result.rules).toEqual([]);
   });
 
   it("does not mutate input collections", () => {

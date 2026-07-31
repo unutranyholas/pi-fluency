@@ -66,7 +66,7 @@ Pi Fluency counts only findings you accept. Every analyzer-classified English pr
 accepted mistake rate = accepted occurrences / English words × 1000
 ```
 
-Stats covers trailing 30 local calendar days. It shows accepted rate, review coverage, one-off total, recurring patterns, and trends. Pattern list is sorted by accepted occurrence count. Pattern becomes recurring after at least two accepted occurrences across retained history; one-offs remain in overall accepted totals and rate but stay out of recurring-pattern list and toolbar count.
+Stats covers trailing 30 local calendar days. It shows accepted rate, review coverage, one-off total, recurring patterns, and trends. Pattern list is sorted by accepted occurrence count. Pattern becomes recurring after accepted findings appear in at least two distinct prompts across retained history; one-offs remain in overall accepted totals and rate but stay out of recurring-pattern list and toolbar count.
 
 Toolbar summarizes current activity and accepted-mistake trends:
 

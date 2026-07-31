@@ -186,12 +186,15 @@ export function computeFluencyAnalytics(input: AnalyticsInput): FluencyAnalytics
       && within(occurrence.localDate, start, end)).length;
   };
 
-  const lifetimeAcceptedForGroup = (group: RuleGroup): number => occurrences.filter((occurrence) =>
-    occurrence.decision === "accepted" && group.patternIds.has(occurrence.patternId)).length;
+  const acceptedPromptHashesForGroup = (group: RuleGroup): Set<string> => new Set(
+    occurrences
+      .filter((occurrence) => occurrence.decision === "accepted" && group.patternIds.has(occurrence.patternId))
+      .map((occurrence) => occurrence.promptHash),
+  );
   const recurringGroups = [...groupsByExplanation.values()].filter((group) =>
-    lifetimeAcceptedForGroup(group) >= 2);
+    acceptedPromptHashesForGroup(group).size >= 2);
   const oneOffAccepted = [...groupsByExplanation.values()]
-    .filter((group) => lifetimeAcceptedForGroup(group) === 1)
+    .filter((group) => acceptedPromptHashesForGroup(group).size === 1)
     .reduce((sum, group) => sum + acceptedForGroup(group, today, TREND_DAYS), 0);
 
   const rules = recurringGroups.flatMap((group): RuleAnalytics[] => {
