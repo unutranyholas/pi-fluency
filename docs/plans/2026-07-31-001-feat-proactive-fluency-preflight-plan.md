@@ -503,6 +503,12 @@ flowchart TB
 - Full test suite, typecheck, diff check, and clean-worktree monitor pass from a fresh shell.
 - Local installation loads the new flow after `/reload` without direct history edits.
 
+**Execution evidence:**
+- Installed this checkout through real Pi package discovery with `HOME` and `PI_CODING_AGENT_DIR` both isolated under a temporary root.
+- Real Pi v0.82.0 loaded `pi-fluency`; `/fluency stats` rendered zeroed Stats and `/fluency practice` rendered Practice mode, selection, snooze state, empty state, and keyboard controls.
+- Isolated extension storage contained only fresh zero-byte history plus generation metadata at mode `0600`; temporary root was deleted after each probe. No real history was edited or cleared.
+- Full decision paths that require seeded recurring history or analyzer outcomes are covered by the real extension event harness and manual fake extension rather than production user data.
+
 ---
 
 ## System-Wide Impact
