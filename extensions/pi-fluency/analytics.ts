@@ -239,7 +239,9 @@ export function selectPracticeAnalysisContext(
     .sort(comparePatternRecency);
   return {
     targetDescriptors,
-    patterns: [...selected, ...remaining].slice(0, maximumPatterns),
+    patterns: [...selected, ...remaining]
+      .slice(0, maximumPatterns)
+      .map((pattern) => ({ ...pattern })),
   };
 }
 

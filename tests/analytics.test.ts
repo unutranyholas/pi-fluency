@@ -479,6 +479,18 @@ describe("computeFluencyAnalytics", () => {
     expect(selectPracticeAnalysisContext(targets, [...patterns].reverse(), 2)).toEqual(context);
   });
 
+  it("does not alias caller-owned patterns in practice analysis context", () => {
+    const targets = [{ explanation: "Selected target.", memberPatternKeys: ["rule.selected"] }];
+    const patterns = [pattern("selected", "Selected target."), pattern("ordinary")];
+    const before = structuredClone(patterns);
+
+    const context = selectPracticeAnalysisContext(targets, patterns, 2);
+    context.patterns[0]!.explanation = "Mutated output.";
+    context.patterns[1]!.occurrenceCount = 999;
+
+    expect(patterns).toEqual(before);
+  });
+
   it("rejects terminal and control payloads at target resolution seams", () => {
     const unsafe = [{ explanation: "Rule.\u001b[31m", memberPatternKeys: ["rule.safe"] }];
     expect(() => resolvePracticeTargets({
