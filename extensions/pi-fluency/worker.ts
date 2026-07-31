@@ -14,8 +14,12 @@ export interface AnalyzerCoordinatorOwner {
 
 interface OwnerState {
   revoked: boolean;
-  revokedPromise: Promise<void>;
-  revoke: () => void;
+  revocationListeners: Set<() => void>;
+}
+
+interface OwnerRevocationSubscription {
+  promise: Promise<"revoked">;
+  unsubscribe: () => void;
 }
 
 interface SettledAnalysis<T> {
@@ -68,9 +72,7 @@ export class AnalyzerCoordinator {
 
   attachOwner(): AnalyzerCoordinatorOwner {
     const token = Symbol("pi-fluency-analyzer-owner");
-    let revoke!: () => void;
-    const revokedPromise = new Promise<void>((resolve) => { revoke = resolve; });
-    this.owners.set(token, { revoked: false, revokedPromise, revoke });
+    this.owners.set(token, { revoked: false, revocationListeners: new Set() });
     return { token };
   }
 
@@ -137,10 +139,32 @@ export class AnalyzerCoordinator {
     return active;
   }
 
-  private ownerRevoked(owner: AnalyzerCoordinatorOwner): Promise<"revoked"> {
+  private subscribeOwnerRevocation(owner: AnalyzerCoordinatorOwner): OwnerRevocationSubscription {
     const state = this.owners.get(owner.token);
-    if (!state || state.revoked) return Promise.resolve("revoked");
-    return state.revokedPromise.then(() => "revoked" as const);
+    if (!state || state.revoked) {
+      return { promise: Promise.resolve("revoked"), unsubscribe: () => undefined };
+    }
+    let listener!: () => void;
+    const promise = new Promise<"revoked">((resolve) => {
+      listener = () => {
+        state.revocationListeners.delete(listener);
+        resolve("revoked");
+      };
+      state.revocationListeners.add(listener);
+    });
+    return {
+      promise,
+      unsubscribe: () => state.revocationListeners.delete(listener),
+    };
+  }
+
+  private async raceOwnerRevocation<T>(owner: AnalyzerCoordinatorOwner, operation: Promise<T>): Promise<T | "revoked"> {
+    const subscription = this.subscribeOwnerRevocation(owner);
+    try {
+      return await Promise.race([operation, subscription.promise]);
+    } finally {
+      subscription.unsubscribe();
+    }
   }
 
   async runBackground<T>(
@@ -151,11 +175,11 @@ export class AnalyzerCoordinator {
       if (!this.isCurrentOwner(owner)) throw new DOMException("Aborted", "AbortError");
       if (this.quarantined) throw new AnalyzerCoordinatorUnavailableError("Analyzer coordinator quarantined");
       if (this.active || this.foregroundPending > 0) {
-        await Promise.race([this.waitForChange(), this.ownerRevoked(owner)]);
+        await this.raceOwnerRevocation(owner, this.waitForChange());
         continue;
       }
       const active = this.start(owner, task);
-      const settled = await Promise.race([active.settlement, this.ownerRevoked(owner)]);
+      const settled = await this.raceOwnerRevocation(owner, active.settlement);
       if (settled === "revoked") throw new DOMException("Aborted", "AbortError");
       if (!this.isCurrentOwner(owner) || active.invalidated) throw new DOMException("Aborted", "AbortError");
       if (settled.ok) return settled.value as T;
@@ -244,12 +268,11 @@ export class AnalyzerCoordinator {
             options.signal!.addEventListener("abort", onAbort, { once: true });
             if (options.signal!.aborted) onAbort();
           });
-        outcome = await Promise.race([
+        outcome = await this.raceOwnerRevocation(options.owner, Promise.race([
           active.settlement,
           deadlineRace,
           cancelRace,
-          this.ownerRevoked(options.owner),
-        ]);
+        ]));
       } finally {
         if (deadlineTimer !== undefined) clearTimeout(deadlineTimer);
         if (onAbort !== undefined) options.signal!.removeEventListener("abort", onAbort);
@@ -261,6 +284,7 @@ export class AnalyzerCoordinator {
         return { kind: "timeout" };
       }
       if (!this.isCurrentOwner(options.owner)) return { kind: "shutdown" };
+      if (active.invalidated) return { kind: "cancelled" };
       if (outcome.ok) return { kind: "success", result: outcome.value as AnalysisResult };
       return { kind: "error", error: outcome.error ?? new Error("Analysis failed") };
     } finally {
@@ -273,7 +297,8 @@ export class AnalyzerCoordinator {
     const state = this.owners.get(owner.token);
     if (!state || state.revoked) return;
     state.revoked = true;
-    state.revoke();
+    for (const listener of state.revocationListeners) listener();
+    state.revocationListeners.clear();
     this.owners.delete(owner.token);
     this.changed();
     const active = this.active;

@@ -284,6 +284,42 @@ describe("FluencyWorker", () => {
     }
   });
 
+  it("discards a foreground result invalidated by a concurrent foreground timeout", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(1_000);
+    try {
+      const coordinator = new AnalyzerCoordinator();
+      const owner = coordinator.attachOwner();
+      const firstResult = createDeferred<AnalysisResult>();
+      const persist = vi.fn();
+      const first = coordinator.analyzeForeground({
+        owner,
+        analyzer: { analyze: vi.fn(() => firstResult.promise) },
+        prompt: prompt("first"),
+        patterns: [],
+        deadline: Date.now() + 6_000,
+      }).then((outcome) => {
+        if (outcome.kind === "success") persist(outcome.result);
+        return outcome;
+      });
+      const second = coordinator.analyzeForeground({
+        owner,
+        analyzer: { analyze: vi.fn().mockResolvedValue(emptyResult) },
+        prompt: prompt("second"),
+        patterns: [],
+        deadline: Date.now() + 50,
+      });
+
+      await vi.advanceTimersByTimeAsync(150);
+      await expect(second).resolves.toEqual({ kind: "busy" });
+      firstResult.resolve(emptyResult);
+      await expect(first).resolves.toEqual({ kind: "cancelled" });
+      expect(persist).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("removes foreground deadline timers and cancellation listeners after success", async () => {
     vi.useFakeTimers();
     try {
@@ -304,6 +340,10 @@ describe("FluencyWorker", () => {
 
       expect(addListener).toHaveBeenCalledWith("abort", expect.any(Function), { once: true });
       expect(removeListener).toHaveBeenCalledWith("abort", expect.any(Function));
+      const ownerState = (coordinator as unknown as {
+        owners: Map<symbol, { revocationListeners: Set<() => void> }>;
+      }).owners.get(owner.token);
+      expect(ownerState?.revocationListeners.size).toBe(0);
       expect(vi.getTimerCount()).toBe(0);
     } finally {
       vi.useRealTimers();
