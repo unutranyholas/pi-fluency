@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { CoachingOverlay } from "../extensions/pi-fluency/coaching-overlay.js";
+import { CoachingOverlay, showCoachingOverlay } from "../extensions/pi-fluency/coaching-overlay.js";
 import type { AnalyzerMistake, PracticeTarget } from "../extensions/pi-fluency/types.js";
 
 const mistake = (key: string, label: string): AnalyzerMistake => ({
@@ -72,6 +72,71 @@ describe("CoachingOverlay", () => {
     overlay.handleInput("down");
     overlay.handleInput("enter");
     expect(finish).toHaveBeenCalledWith("send-once");
+  });
+
+  it("paginates matches within one rule and pins actions at short height", () => {
+    const overlay = new CoachingOverlay({
+      tui: { requestRender: vi.fn(), terminal: { rows: 15 } },
+      keybindings,
+      finish: vi.fn(),
+    });
+    overlay.setMatches(
+      Array.from({ length: 5 }, (_, index) => mistake("same", `match-${index + 1}`)),
+      [{ explanation: "One busy rule", memberPatternKeys: ["same"] }],
+    );
+
+    const firstLines = overlay.render(80);
+    const first = plain(firstLines);
+    expect(firstLines).toHaveLength(15);
+    expect(first).toContain("5 matches · +4 more");
+    expect(first).toContain("Original: Original match-1");
+    expect(first).toContain("Why: Why match-1");
+    expect(first).toContain("› Edit");
+    expect(first).toContain("5 Snooze 5 hours");
+
+    overlay.handleInput("page-down");
+    const second = plain(overlay.render(80));
+    expect(second).toContain("Original: Original match-2");
+    expect(second).not.toContain("Original: Original match-1");
+    overlay.handleInput("page-up");
+    expect(plain(overlay.render(80))).toContain("Original: Original match-1");
+  });
+
+  it("reserves snooze before persistence so abort cannot choose unchecked send", async () => {
+    let component!: CoachingOverlay;
+    let finishCustom!: () => void;
+    let resolveSave!: () => void;
+    const save = vi.fn(() => new Promise<void>((resolve) => { resolveSave = resolve; }));
+    const controller = new AbortController();
+    const ctx = {
+      mode: "tui",
+      ui: {
+        custom: vi.fn((factory: Function) => new Promise<void>((resolve) => {
+          finishCustom = resolve;
+          component = factory(
+            { requestRender: vi.fn(), terminal: { rows: 30 } },
+            undefined,
+            keybindings,
+            resolve,
+          );
+        })),
+      },
+    } as never;
+    const shown = showCoachingOverlay(ctx, Promise.resolve({
+      kind: "matches" as const,
+      mistakes: [mistake("first", "one")],
+      targets: [{ explanation: "Rule", memberPatternKeys: ["first"] }],
+    }), controller.signal, save);
+    await vi.waitFor(() => expect(component).toBeDefined());
+    await vi.waitFor(() => expect(plain(component.render(80))).toContain("Practice check"));
+
+    component.handleInput("5");
+    await vi.waitFor(() => expect(save).toHaveBeenCalledWith("snooze-five-hours"));
+    controller.abort();
+    expect(plain(component.render(80))).toContain("Saving snooze…");
+    resolveSave();
+    await expect(shown).resolves.toBe("snooze-five-hours");
+    finishCustom();
   });
 
   it("freezes every action while snooze save is pending", () => {

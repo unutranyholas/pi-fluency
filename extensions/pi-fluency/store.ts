@@ -79,7 +79,7 @@ export interface AnalysisCommitFence {
   minimumConfidence: number;
 }
 
-export type ConditionalAppendResult = "committed" | "generation-stale" | "configuration-stale";
+export type ConditionalAppendResult = "committed" | "generation-stale" | "authorization-stale" | "analyzer-stale";
 
 const errantCategorySet = new Set<string>(ERRANT_CATEGORIES);
 
@@ -719,10 +719,10 @@ export class FluencyStore {
       if (!current.enabled
         || current.consentedAt === undefined
         || current.enabled !== fence.enabled
-        || current.consentedAt !== fence.consentedAt
-        || current.provider !== fence.provider
+        || current.consentedAt !== fence.consentedAt) return "authorization-stale";
+      if (current.provider !== fence.provider
         || current.modelId !== fence.modelId
-        || current.minimumConfidence !== fence.minimumConfidence) return "configuration-stale";
+        || current.minimumConfidence !== fence.minimumConfidence) return "analyzer-stale";
       this.assertHistoryReady();
       await this.appendUnsafe(event, signal);
       return "committed";

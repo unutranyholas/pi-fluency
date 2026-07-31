@@ -121,7 +121,7 @@ describe("FluencyStore generation recovery", () => {
     expect((await FluencyStore.open(root)).hasProcessedPromptHash("stale-after-clear")).toBe(false);
   });
 
-  it("discards delayed precomputed analysis after consent or analyzer configuration changes", async () => {
+  it("distinguishes revoked analytics authorization from analyzer changes", async () => {
     const store = await FluencyStore.open(root);
     await store.updateSettings({
       ...DEFAULT_SETTINGS,
@@ -131,11 +131,16 @@ describe("FluencyStore generation recovery", () => {
       modelId: "model",
     });
     const fence = store.captureAnalysisCommitFence();
-    await (await FluencyStore.open(root)).updateSettings({ modelId: "new-model" });
+    await (await FluencyStore.open(root)).updateSettings({ enabled: false });
 
-    expect(await store.conditionalAppendAnalysis(fence, collected("stale-config"), result))
-      .toBe("configuration-stale");
-    expect((await FluencyStore.open(root)).hasProcessedPromptHash("stale-config")).toBe(false);
+    expect(await store.conditionalAppendAnalysis(fence, collected("stale-auth"), result))
+      .toBe("authorization-stale");
+    expect((await FluencyStore.open(root)).hasProcessedPromptHash("stale-auth")).toBe(false);
+
+    await (await FluencyStore.open(root)).updateSettings({ enabled: true, modelId: "new-model" });
+    expect(await store.conditionalAppendAnalysis(fence, collected("stale-analyzer"), result))
+      .toBe("analyzer-stale");
+    expect((await FluencyStore.open(root)).hasProcessedPromptHash("stale-analyzer")).toBe(false);
   });
 
   it("conditionally appends once when generation and analyzer authorization stay exact", async () => {

@@ -89,6 +89,8 @@ Local analytics live under `~/.pi/agent/pi-fluency/`. History contains hashes, d
 
 Model findings can be incomplete or wrong. Accept only findings you agree with. Pi Fluency measures reviewed writing patterns; it does not assess fluency, guarantee improvement, or replace human instruction.
 
+Input-handler order limits draft provenance. Extensions running before Pi Fluency can alter text Pi Fluency receives and can therefore alter text restored for Edit. Extensions running after Pi Fluency can alter or intercept text Pi Fluency allowed, so analyzed text is not guaranteed to equal final sent text.
+
 ## Project
 
 Product idea and product decisions are by Ihar Trafimovich. All code, tests, and documentation were written by AI.

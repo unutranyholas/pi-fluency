@@ -86,6 +86,7 @@ export interface ExtensionHarness {
   confirm: MockedFunction<ExtensionContext["ui"]["confirm"]>;
   custom: MockedFunction<ExtensionContext["ui"]["custom"]>;
   editorWrites: string[];
+  sessionEntries: Array<{ type: "custom"; customType: string; data: unknown }>;
   get editorText(): string;
   get abortObserved(): boolean;
   get cleanupFinished(): boolean;
@@ -130,8 +131,10 @@ export async function createExtensionHarness(options: {
   analyzerMode?: "resolve" | "wait-for-abort" | "wait-for-abort-cleanup" | "wait-for-error";
   analysisResult?: AnalysisResult;
   editorFailure?: "preserve" | "clear";
+  rootDir?: string;
+  sessionEntries?: Array<{ type: "custom"; customType: string; data: unknown }>;
 }): Promise<ExtensionHarness> {
-  const rootDir = await mkdtemp(join(tmpdir(), "pi-fluency-extension-"));
+  const rootDir = options.rootDir ?? await mkdtemp(join(tmpdir(), "pi-fluency-extension-"));
   if (options.enabled) {
     await writeFile(join(rootDir, "settings.json"), JSON.stringify({
       ...DEFAULT_SETTINGS,
@@ -223,7 +226,7 @@ export async function createExtensionHarness(options: {
     find: (provider: string, id: string) => modelAvailable && provider === model.provider && id === model.id ? model : undefined,
     getApiKeyAndHeaders: vi.fn().mockResolvedValue({ ok: true, apiKey: "fake-key" }),
   };
-  const sessionEntries: Array<{ type: "custom"; customType: string; data: unknown }> = [];
+  const sessionEntries = options.sessionEntries ?? [];
   const ctx = {
     ui,
     modelRegistry: registry,
@@ -287,6 +290,7 @@ export async function createExtensionHarness(options: {
     confirm,
     custom,
     editorWrites,
+    sessionEntries,
     get editorText() { return editorText; },
     get abortObserved() { return abortObserved; },
     get cleanupFinished() { return cleanupFinished; },

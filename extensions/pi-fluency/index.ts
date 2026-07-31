@@ -8,7 +8,7 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 import { Key } from "@earendil-works/pi-tui";
 import { AnalyzerConfigurationError, ModelAnalyzer, type Analyzer } from "./analyzer.js";
-import { computeFluencyAnalytics, selectPracticeAnalysisContext } from "./analytics.js";
+import { computeFluencyAnalytics, resolvePracticeTargets, selectPracticeAnalysisContext } from "./analytics.js";
 import { collectPrompt } from "./collector.js";
 import {
   showCoachingOverlay,
@@ -582,7 +582,14 @@ function registerHandlers(pi: ExtensionAPI, dependencies: ResolvedDependencies):
       return failOpen("Sent without practice check — policy unavailable.");
     }
     const initialSessionSnoozed = isSessionPracticeSnoozed(ctx, store, initialPolicy.practice);
+    const hasActiveTarget = resolvePracticeTargets({
+      targets: initialPolicy.practice.targets,
+      patterns: store.listKnownPatterns(),
+      ignoredPatternKeys: new Set(initialPolicy.settings.ignoredPatternKeys),
+      ignoredCategories: new Set(initialPolicy.settings.ignoredCategories),
+    }).some((target) => target.coachingEnabled);
     if (!hasValidConfiguration(initialPolicy.settings, ctx)
+      || !hasActiveTarget
       || !isCoachingEligible({
         source: event.source,
         idle: true,
@@ -674,31 +681,30 @@ function registerHandlers(pi: ExtensionAPI, dependencies: ResolvedDependencies):
         return;
       }
       const operationDeadline = Date.now() + 1_000;
-      let activated = false;
-      try {
-        const mutation = store.snoozePracticeForFiveHours(
-          checkPolicy.practice.revision,
-          operationDeadline,
-          dependencies.now(),
-        );
-        activated = await Promise.race([
-          mutation,
-          new Promise<false>((resolve) => setTimeout(() => resolve(false), Math.max(0, operationDeadline - Date.now()))),
-        ]);
-        if (!activated) {
-          const authoritative = await store.getFreshPolicySnapshot(Date.now() + 1_000);
-          activated = (authoritative.practice.snoozedUntil ?? 0) > dependencies.now();
-          if (!activated) ctx.ui.notify("Sent once; 5-hour snooze was not activated.", "warning");
-        }
-      } catch {
+      const mutation = store.snoozePracticeForFiveHours(
+        checkPolicy.practice.revision,
+        operationDeadline,
+        dependencies.now(),
+      ).then((activated) => ({ kind: "result" as const, activated }), () => ({ kind: "error" as const }));
+      const first = await Promise.race([
+        mutation,
+        new Promise<{ kind: "deadline" }>((resolve) => setTimeout(
+          () => resolve({ kind: "deadline" }),
+          Math.max(0, operationDeadline - Date.now()),
+        )),
+      ]);
+      if (first.kind === "result" && first.activated) return;
+
+      // Mutation and confirmation share one absolute second. Never manufacture a second deadline.
+      if (Date.now() < operationDeadline) {
         try {
-          const authoritative = await store.getFreshPolicySnapshot(Date.now() + 1_000);
-          activated = (authoritative.practice.snoozedUntil ?? 0) > dependencies.now();
-          if (!activated) ctx.ui.notify("Sent once; 5-hour snooze was not activated.", "warning");
-        } catch {
-          ctx.ui.notify("Sent once; snooze state unknown — use /fluency practice resume.", "warning");
-        }
+          const authoritative = await store.getFreshPolicySnapshot(operationDeadline);
+          if ((authoritative.practice.snoozedUntil ?? 0) > dependencies.now()) return;
+          ctx.ui.notify("Sent once; 5-hour snooze was not activated.", "warning");
+          return;
+        } catch { /* Remaining deadline could not establish authoritative state. */ }
       }
+      ctx.ui.notify("Sent once; snooze state unknown — use /fluency practice resume.", "warning");
     };
 
     let decision: CoachingOverlayDecision;
@@ -754,7 +760,7 @@ function registerHandlers(pi: ExtensionAPI, dependencies: ResolvedDependencies):
         let tracked!: Promise<void>;
         tracked = store.conditionalAppendAnalysis(commitFence, prompt, successfulResult)
           .then((result) => {
-            if (result === "configuration-stale" && !shuttingDown) queueBackground();
+            if (result === "analyzer-stale" && !shuttingDown) queueBackground();
             else if (result === "committed" && !shuttingDown) publishProgress(ctx, store);
           })
           .catch((error) => {

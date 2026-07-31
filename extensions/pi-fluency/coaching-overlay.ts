@@ -49,6 +49,7 @@ export class CoachingOverlay implements Component {
   private targets: PracticeTarget[] = [];
   private selectedAction = 0;
   private detailOffset = 0;
+  private visibleDetailCount = 1;
   private disposed = false;
 
   constructor(private readonly options: CoachingOverlayOptions) {}
@@ -96,10 +97,10 @@ export class CoachingOverlay implements Component {
       this.selectedAction = Math.max(0, this.selectedAction - 1);
       this.options.tui.requestRender();
     } else if (this.matches(data, "tui.select.pageDown")) {
-      this.detailOffset = Math.min(Math.max(0, this.mistakeGroups().length - 1), this.detailOffset + 1);
+      this.detailOffset = Math.min(Math.max(0, this.orderedDetails().length - 1), this.detailOffset + this.visibleDetailCount);
       this.options.tui.requestRender();
     } else if (this.matches(data, "tui.select.pageUp")) {
-      this.detailOffset = Math.max(0, this.detailOffset - 1);
+      this.detailOffset = Math.max(0, this.detailOffset - this.visibleDetailCount);
       this.options.tui.requestRender();
     } else if (data === Key.enter || this.matches(data, "tui.select.confirm")) {
       const action = (["edit", "send-once", "snooze-session", "snooze-five-hours"] as const)[this.selectedAction]!;
@@ -109,15 +110,8 @@ export class CoachingOverlay implements Component {
   }
 
   private beginSnooze(action: CoachingSnoozeDecision): void {
-    if (!this.options.saveSnooze) {
-      this.options.finish(action);
-      return;
-    }
-    this.setSaving(true);
-    void this.options.saveSnooze(action).then(
-      () => this.options.finish(action),
-      () => this.setSaving(false),
-    );
+    // showCoachingOverlay reserves this terminal outcome before persistence starts.
+    this.options.finish(action);
   }
 
   private mistakeGroups(): Array<{ label: string; mistakes: AnalyzerMistake[] }> {
@@ -132,6 +126,11 @@ export class CoachingOverlay implements Component {
     return groups;
   }
 
+  private orderedDetails(): Array<{ label: string; mistake: AnalyzerMistake }> {
+    return this.mistakeGroups().flatMap((group) =>
+      group.mistakes.map((mistake) => ({ label: group.label, mistake })));
+  }
+
   render(width: number): string[] {
     const contentWidth = Math.max(40, Math.min(width - 2, 88));
     const border = (text: string): string => this.options.theme?.fg("border", text) ?? text;
@@ -139,33 +138,46 @@ export class CoachingOverlay implements Component {
     if (this.mode === "checking") {
       lines.push(" Checking selected fluency rules…", "", " s Send unchecked   esc Edit");
     } else {
-      const groups = this.mistakeGroups();
-      const visible = groups.slice(this.detailOffset, this.detailOffset + 3);
-      const hidden = groups.slice(this.detailOffset + visible.length)
-        .reduce((total, group) => total + group.mistakes.length, 0);
+      const details = this.orderedDetails();
+      const actionLines = this.mode === "saving"
+        ? [" Saving snooze…"]
+        : [...ACTIONS.map((action, index) => ` ${index === this.selectedAction ? "›" : " "} ${action}`),
+          " e Edit  s Send once  t Snooze session  5 Snooze 5 hours  esc Edit"];
+      // Border, heading, action separator, and actions stay visible even on short terminals.
+      const detailBudget = Math.max(3, this.options.tui.terminal.rows - actionLines.length - 5);
+      const detailLines: string[] = [];
+      let shown = 0;
+      let priorLabel: string | undefined;
+      const shownLabels = new Set<string>();
+      for (const detail of details.slice(this.detailOffset)) {
+        if (!shownLabels.has(detail.label) && shownLabels.size >= 3) break;
+        const block: string[] = [];
+        if (detail.label !== priorLabel) {
+          block.push(" ────────────────────────────────────────", ` Rule: ${safe(detail.label)}`);
+        }
+        for (const [label, value] of [
+          ["Original", detail.mistake.sourceExcerpt],
+          ["Suggestion", detail.mistake.correctedExcerpt],
+          ["Why", detail.mistake.explanation],
+        ] as const) {
+          const wrapped = wrapTextWithAnsi(`${label}: ${safe(value)}`, Math.max(10, contentWidth - 2));
+          block.push(...wrapped.map((line) => ` ${line}`));
+        }
+        if (shown > 0 && detailLines.length + block.length > detailBudget) break;
+        detailLines.push(...block.slice(0, Math.max(0, detailBudget - detailLines.length)));
+        shown += 1;
+        shownLabels.add(detail.label);
+        priorLabel = detail.label;
+        if (detailLines.length >= detailBudget) break;
+      }
+      this.visibleDetailCount = Math.max(1, shown);
+      const hidden = Math.max(0, details.length - this.detailOffset - shown);
       lines.push(` Practice check · ${this.mistakes.length} ${this.mistakes.length === 1 ? "match" : "matches"}${hidden > 0 ? ` · +${hidden} more` : ""}`);
-      for (const group of visible) {
-        lines.push(" ────────────────────────────────────────", ` Rule: ${safe(group.label)}`);
-        for (const mistake of group.mistakes) {
-          for (const [label, value] of [
-            ["Original", mistake.sourceExcerpt],
-            ["Suggestion", mistake.correctedExcerpt],
-            ["Why", mistake.explanation],
-          ] as const) {
-            const wrapped = wrapTextWithAnsi(`${label}: ${safe(value)}`, Math.max(10, contentWidth - 2));
-            lines.push(...wrapped.map((line) => ` ${line}`));
-          }
-        }
+      lines.push(...detailLines);
+      if (this.detailOffset > 0 || hidden > 0) {
+        lines.push(` PageUp/PageDown details · ${this.detailOffset + 1}-${this.detailOffset + shown} of ${details.length} matches`);
       }
-      if (groups.length > 3) lines.push(` PageUp/PageDown details · ${this.detailOffset + 1}-${this.detailOffset + visible.length} of ${groups.length} rules`);
-      lines.push(" ────────────────────────────────────────");
-      if (this.mode === "saving") lines.push(" Saving snooze…");
-      else {
-        for (let index = 0; index < ACTIONS.length; index += 1) {
-          lines.push(` ${index === this.selectedAction ? "›" : " "} ${ACTIONS[index]}`);
-        }
-        lines.push(" e Edit  s Send once  t Snooze session  5 Snooze 5 hours  esc Edit");
-      }
+      lines.push(" ────────────────────────────────────────", ...actionLines);
     }
     const top = border(`╭${"─".repeat(contentWidth)}╮`);
     const bottom = border(`╰${"─".repeat(contentWidth)}╯`);
@@ -191,6 +203,16 @@ export async function showCoachingOverlay(
   const finish = (value: CoachingOverlayDecision): void => {
     if (settled) return;
     settled = true;
+    if ((value === "snooze-session" || value === "snooze-five-hours") && saveSnooze) {
+      // Reserve snooze as terminal winner before persistence. Abort/shutdown now lose without side effects.
+      overlay?.setSaving(true);
+      void Promise.resolve().then(() => saveSnooze(value)).catch(() => undefined).finally(() => {
+        overlay?.dispose();
+        close?.();
+        resolveDecision(value);
+      });
+      return;
+    }
     overlay?.dispose();
     close?.();
     resolveDecision(value);

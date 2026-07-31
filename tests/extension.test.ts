@@ -3,6 +3,7 @@ import { join } from "node:path";
 import { lock } from "proper-lockfile";
 import { describe, expect, it, vi } from "vitest";
 import { AnalyzerConfigurationError } from "../extensions/pi-fluency/analyzer.js";
+import type { CoachingOverlay } from "../extensions/pi-fluency/coaching-overlay.js";
 import { createFluencyExtension, type OpenInbox } from "../extensions/pi-fluency/index.js";
 import { FluencyStore } from "../extensions/pi-fluency/store.js";
 import { DEFAULT_SETTINGS, type AnalysisResult } from "../extensions/pi-fluency/types.js";
@@ -905,6 +906,78 @@ describe("Pi Fluency extension", () => {
     await vi.waitFor(() => expect(harness.analyzer.analyze).toHaveBeenCalledTimes(2));
   });
 
+  it("keeps snooze terminal winner when shutdown races in-flight persistence", async () => {
+    const harness = await createExtensionHarness({ enabled: true });
+    const store = await FluencyStore.open(harness.deps.rootDir);
+    await store.activatePractice(2, {
+      explanation: oneMistake.mistakes[0]!.explanation,
+      memberPatternKeys: [oneMistake.mistakes[0]!.patternKey],
+    });
+    let component!: CoachingOverlay;
+    harness.custom.mockImplementation((factory: Function) => new Promise<void>((resolve) => {
+      component = factory(
+        { requestRender: vi.fn(), terminal: { rows: 30 } },
+        undefined,
+        { matches: () => false },
+        resolve,
+      );
+    }) as never);
+    const prototype = FluencyStore.prototype;
+    const original = prototype.snoozePracticeForFiveHours;
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    prototype.snoozePracticeForFiveHours = function (...args) {
+      return gate.then(() => original.apply(this, args));
+    };
+    try {
+      createFluencyExtension(harness.deps)(harness.pi);
+      let inputSettled = false;
+      const input = harness.emitInput("I made an mistake before shutdown race.")
+        .finally(() => { inputSettled = true; });
+      await vi.waitFor(() => expect(component).toBeDefined());
+      await vi.waitFor(() => expect(component.render(80).join("\n")).toContain("Practice check"));
+      component.handleInput("5");
+      await harness.emitSessionShutdown("reload");
+      expect(inputSettled).toBe(false);
+      release();
+      expect(await input).toEqual({ action: "continue" });
+      expect((await FluencyStore.open(harness.deps.rootDir)).getPracticeSettings().snoozedUntil).toBe(123 + 5 * 60 * 60 * 1_000);
+    } finally {
+      prototype.snoozePracticeForFiveHours = original;
+    }
+  });
+
+  it("restores conversation snooze through recreated extension for same session file", async () => {
+    const first = await createExtensionHarness({ enabled: true });
+    const store = await FluencyStore.open(first.deps.rootDir);
+    await store.activatePractice(2, {
+      explanation: oneMistake.mistakes[0]!.explanation,
+      memberPatternKeys: [oneMistake.mistakes[0]!.patternKey],
+    });
+    createFluencyExtension({
+      ...first.deps,
+      showCoaching: async (_ctx, check) => {
+        await check;
+        return "snooze-session";
+      },
+    })(first.pi);
+    expect(await first.emitInput("I made an mistake before reload.")).toEqual({ action: "continue" });
+    await first.emitSessionShutdown("reload");
+
+    const second = await createExtensionHarness({
+      enabled: true,
+      rootDir: first.deps.rootDir,
+      sessionEntries: first.sessionEntries,
+    });
+    const showCoaching = vi.fn(async () => "edit" as const);
+    createFluencyExtension({ ...second.deps, showCoaching })(second.pi);
+    expect(await second.emitInput("I made an mistake after same-file reload.")).toEqual({ action: "continue" });
+    expect(showCoaching).not.toHaveBeenCalled();
+    expect(second.analyzer.analyze).not.toHaveBeenCalled();
+    await second.emitAgentSettled();
+    await vi.waitFor(() => expect(second.analyzer.analyze).toHaveBeenCalledOnce());
+  });
+
   it("activates durable five-hour snooze, bypasses later checks, and Resume now clears it", async () => {
     const harness = await createExtensionHarness({ enabled: true });
     const store = await FluencyStore.open(harness.deps.rootDir);
@@ -926,6 +999,25 @@ describe("Pi Fluency extension", () => {
 
     await harness.runCommand("practice resume");
     expect((await FluencyStore.open(harness.deps.rootDir)).getPracticeSettings().snoozedUntil).toBeUndefined();
+  });
+
+  it("bypasses foreground for ignored-only targets and retains background analytics", async () => {
+    const harness = await createExtensionHarness({ enabled: true });
+    const store = await FluencyStore.open(harness.deps.rootDir);
+    const patternKey = oneMistake.mistakes[0]!.patternKey;
+    await store.activatePractice(2, {
+      explanation: oneMistake.mistakes[0]!.explanation,
+      memberPatternKeys: [patternKey],
+    });
+    await store.updateSettings({ ignoredPatternKeys: [patternKey] });
+    const showCoaching = vi.fn(async () => "edit" as const);
+    createFluencyExtension({ ...harness.deps, showCoaching })(harness.pi);
+
+    expect(await harness.emitInput("I made an mistake ignored by practice.")).toEqual({ action: "continue" });
+    expect(showCoaching).not.toHaveBeenCalled();
+    expect(harness.analyzer.analyze).not.toHaveBeenCalled();
+    await harness.emitAgentSettled();
+    await vi.waitFor(() => expect(harness.analyzer.analyze).toHaveBeenCalledOnce());
   });
 
   it("keeps images and active-stream input outside preflight while retaining background analytics", async () => {
@@ -981,6 +1073,37 @@ describe("Pi Fluency extension", () => {
     expect((await FluencyStore.open(harness.deps.rootDir)).getAnalyticsSnapshot().observations).toEqual([]);
   });
 
+  it("never queues a prompt when consent is revoked after final read but before conditional append", async () => {
+    const harness = await createExtensionHarness({ enabled: true });
+    const store = await FluencyStore.open(harness.deps.rootDir);
+    await store.activatePractice(2, {
+      explanation: oneMistake.mistakes[0]!.explanation,
+      memberPatternKeys: [oneMistake.mistakes[0]!.patternKey],
+    });
+    const showCoaching = vi.fn(async (_ctx, check) => {
+      await check;
+      return "send-once" as const;
+    });
+    const prototype = FluencyStore.prototype;
+    const original = prototype.conditionalAppendAnalysis;
+    const pause = vi.fn(async () => {
+      await (await FluencyStore.open(harness.deps.rootDir)).updateSettings({ enabled: false });
+    });
+    prototype.conditionalAppendAnalysis = function (...args) {
+      return pause().then(() => original.apply(this, args));
+    };
+    try {
+      createFluencyExtension({ ...harness.deps, showCoaching })(harness.pi);
+      expect(await harness.emitInput("I made an mistake before append-time revocation.")).toEqual({ action: "continue" });
+      await vi.waitFor(() => expect(pause).toHaveBeenCalledOnce());
+      await harness.emitAgentSettled();
+      expect(harness.analyzer.analyze).toHaveBeenCalledTimes(1);
+      expect((await FluencyStore.open(harness.deps.rootDir)).getAnalyticsSnapshot().observations).toEqual([]);
+    } finally {
+      prototype.conditionalAppendAnalysis = original;
+    }
+  });
+
   it("does not enqueue background work when consent is revoked during foreground analysis", async () => {
     const harness = await createExtensionHarness({ enabled: true });
     let resolveAnalysis!: (result: AnalysisResult) => void;
@@ -1004,6 +1127,109 @@ describe("Pi Fluency extension", () => {
     await harness.emitAgentSettled();
     expect(harness.analyzer.analyze).toHaveBeenCalledTimes(1);
     expect((await FluencyStore.open(harness.deps.rootDir)).getAnalyticsSnapshot().observations).toEqual([]);
+  });
+
+  it("reports five-hour snooze not activated after authoritative absent reread", async () => {
+    const harness = await createExtensionHarness({ enabled: true });
+    const store = await FluencyStore.open(harness.deps.rootDir);
+    await store.activatePractice(2, {
+      explanation: oneMistake.mistakes[0]!.explanation,
+      memberPatternKeys: [oneMistake.mistakes[0]!.patternKey],
+    });
+    const prototype = FluencyStore.prototype;
+    const original = prototype.snoozePracticeForFiveHours;
+    prototype.snoozePracticeForFiveHours = vi.fn(async () => false);
+    const showCoaching = vi.fn(async (_ctx, check, _signal, saveSnooze) => {
+      await check;
+      await saveSnooze!("snooze-five-hours");
+      return "snooze-five-hours" as const;
+    });
+    try {
+      createFluencyExtension({ ...harness.deps, showCoaching })(harness.pi);
+      expect(await harness.emitInput("I made an mistake before rejected snooze.")).toEqual({ action: "continue" });
+      expect(harness.notifications.map((item) => item.message)).toContain(
+        "Sent once; 5-hour snooze was not activated.",
+      );
+    } finally {
+      prototype.snoozePracticeForFiveHours = original;
+    }
+  });
+
+  it("uses one absolute snooze deadline and reports unknown after it expires", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(10_000);
+    const harness = await createExtensionHarness({ enabled: true });
+    const store = await FluencyStore.open(harness.deps.rootDir);
+    await store.activatePractice(2, {
+      explanation: oneMistake.mistakes[0]!.explanation,
+      memberPatternKeys: [oneMistake.mistakes[0]!.patternKey],
+    });
+    const prototype = FluencyStore.prototype;
+    const original = prototype.snoozePracticeForFiveHours;
+    const snooze = vi.fn(() => new Promise<boolean>(() => undefined));
+    prototype.snoozePracticeForFiveHours = snooze;
+    const showCoaching = vi.fn(async (_ctx, check, _signal, saveSnooze) => {
+      await check;
+      await saveSnooze!("snooze-five-hours");
+      return "snooze-five-hours" as const;
+    });
+    try {
+      createFluencyExtension({ ...harness.deps, showCoaching })(harness.pi);
+      const input = harness.emitInput("I made an mistake before a timed-out snooze.");
+      await vi.waitFor(() => expect(snooze).toHaveBeenCalledOnce());
+      const beforeDeadlineTimer = Date.now();
+      await vi.advanceTimersToNextTimerAsync();
+      expect(await input).toEqual({ action: "continue" });
+      expect(harness.notifications.map((item) => item.message)).toContain(
+        "Sent once; snooze state unknown — use /fluency practice resume.",
+      );
+      expect(Date.now() - beforeDeadlineTimer).toBeLessThanOrEqual(1_000);
+    } finally {
+      prototype.snoozePracticeForFiveHours = original;
+      vi.useRealTimers();
+    }
+  });
+
+  it("fails open through public extension seam when coaching UI rejects", async () => {
+    const harness = await createExtensionHarness({ enabled: true });
+    const store = await FluencyStore.open(harness.deps.rootDir);
+    await store.activatePractice(2, {
+      explanation: oneMistake.mistakes[0]!.explanation,
+      memberPatternKeys: [oneMistake.mistakes[0]!.patternKey],
+    });
+    const showCoaching = vi.fn(async () => { throw new Error("overlay failed"); });
+    createFluencyExtension({ ...harness.deps, showCoaching })(harness.pi);
+
+    expect(await harness.emitInput("I made an mistake while overlay fails.")).toEqual({ action: "continue" });
+    expect(harness.editorText).toBe("");
+    expect(harness.notifications.at(-1)?.message).toBe("Sent without practice check — analyzer busy/timed out/failed.");
+    expect((await FluencyStore.open(harness.deps.rootDir)).getAnalyticsSnapshot().observations).toEqual([]);
+  });
+
+  it("fails open after foreground timeout through public extension seam", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(20_000);
+    const harness = await createExtensionHarness({ enabled: true, analyzerMode: "wait-for-abort" });
+    const store = await FluencyStore.open(harness.deps.rootDir);
+    await store.activatePractice(2, {
+      explanation: oneMistake.mistakes[0]!.explanation,
+      memberPatternKeys: [oneMistake.mistakes[0]!.patternKey],
+    });
+    const showCoaching = vi.fn(async (_ctx, check) => {
+      expect((await check).kind).toBe("failure");
+      return "technical-failure" as const;
+    });
+    try {
+      createFluencyExtension({ ...harness.deps, showCoaching })(harness.pi);
+      const input = harness.emitInput("I made an mistake until foreground timeout.");
+      await vi.waitFor(() => expect(harness.analyzer.analyze).toHaveBeenCalledOnce());
+      await vi.advanceTimersByTimeAsync(6_100);
+      expect(await input).toEqual({ action: "continue" });
+      expect(harness.abortObserved).toBe(true);
+      expect(harness.notifications.at(-1)?.message).toBe("Sent without practice check — analyzer busy/timed out/failed.");
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("lets checking Send unchecked win analyzer cancellation without a foreground commit", async () => {
