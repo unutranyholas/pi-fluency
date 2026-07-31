@@ -6,6 +6,7 @@ import {
   type AnalysisResult,
   type CollectedPrompt,
   type MistakePattern,
+  type PracticeTarget,
   type RawAnalysisResult,
 } from "./types.js";
 import {
@@ -29,16 +30,39 @@ export interface Analyzer {
     prompt: CollectedPrompt,
     activePatterns: MistakePattern[],
     signal: AbortSignal,
+    selectedTargets?: readonly PracticeTarget[],
   ): Promise<AnalysisResult>;
 }
 
-export function buildAnalysisPrompt(prompt: CollectedPrompt, activePatterns: MistakePattern[]): string {
-  const knownPatterns = activePatterns
+function selectedPatternKeys(
+  activePatterns: readonly MistakePattern[],
+  selectedTargets: readonly PracticeTarget[],
+): Set<string> {
+  const selectedKeys = new Set(selectedTargets.flatMap((target) => target.memberPatternKeys));
+  const selectedExplanations = new Set(selectedTargets.map((target) => target.explanation));
+  return new Set(activePatterns
+    .filter((pattern) => selectedKeys.has(pattern.patternKey) || selectedExplanations.has(pattern.explanation))
+    .map((pattern) => pattern.patternKey));
+}
+
+export function buildAnalysisPrompt(
+  prompt: CollectedPrompt,
+  activePatterns: MistakePattern[],
+  selectedTargets: readonly PracticeTarget[] = [],
+): string {
+  const priorityKeys = selectedPatternKeys(activePatterns, selectedTargets);
+  const orderedPatterns = [
+    ...activePatterns.filter((pattern) => priorityKeys.has(pattern.patternKey)),
+    ...activePatterns.filter((pattern) => !priorityKeys.has(pattern.patternKey)),
+  ];
+  const knownPatterns = orderedPatterns
     .slice(0, MAX_KNOWN_PATTERNS)
     .map(({ patternKey, explanation, errorType }) => ({ patternKey, explanation, errorType }));
+  const includedKeys = new Set(knownPatterns.map((pattern) => pattern.patternKey));
   return JSON.stringify({
     prose: prompt.prose,
     knownPatterns,
+    priorityPatternKeys: [...priorityKeys].filter((key) => includedKeys.has(key)),
     allowedErrorTypes: ERRANT_ERROR_TYPES,
     allowedContextScopes: CONTEXT_SCOPES,
   });
@@ -108,6 +132,7 @@ Do not report style preferences, capitalization of product names, or informal-bu
 A demonstrated fix must match one supplied knownPatterns pattern and quote comparable correct evidence.
 Never infer a demonstrated fix merely because an earlier mistake is absent.
 Reuse an existing knownPatterns patternKey for the same rule; mint a new namespaced lowercase key only when no known rule matches.
+Check priorityPatternKeys carefully before other known patterns. This changes attention only; still return every genuine finding in the full prose.
 Keep every explanation under 240 characters. Return JSON only.`;
 
 export class ModelAnalyzer implements Analyzer {
@@ -121,6 +146,7 @@ export class ModelAnalyzer implements Analyzer {
     prompt: CollectedPrompt,
     activePatterns: MistakePattern[],
     signal: AbortSignal,
+    selectedTargets: readonly PracticeTarget[] = [],
   ): Promise<AnalysisResult> {
     let auth: Awaited<ReturnType<ModelRegistry["getApiKeyAndHeaders"]>>;
     try {
@@ -134,7 +160,7 @@ export class ModelAnalyzer implements Analyzer {
 
     const message: UserMessage = {
       role: "user",
-      content: buildAnalysisPrompt(prompt, activePatterns),
+      content: buildAnalysisPrompt(prompt, activePatterns, selectedTargets),
       timestamp: Date.now(),
     };
     const response = await complete(

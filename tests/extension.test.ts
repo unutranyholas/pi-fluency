@@ -770,7 +770,7 @@ describe("Pi Fluency extension", () => {
     await harness.emitInput("I made an mistake.");
     await harness.emitAgentSettled();
     expect(analyze).toHaveBeenCalledOnce();
-    expect(harness.statuses.get("pi-fluency")).toBe("󰅙 ERR auth");
+    await vi.waitFor(() => expect(harness.statuses.get("pi-fluency")).toBe("󰅙 ERR auth"));
     expect(harness.fakePi.eventEmissions.at(-1)).toMatchObject({
       data: { icon: "󰅙", text: "ERR auth", color: "error" },
     });

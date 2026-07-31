@@ -48,6 +48,25 @@ describe("analysis contract", () => {
     expect(value.allowedContextScopes).toEqual(["sentence", "previous-and-current", "current-and-next"]);
   });
 
+  it("keeps selected target patterns inside bounded context and marks them as priority", () => {
+    const patterns = Array.from({ length: 501 }, (_, index) => ({
+      ...pattern,
+      id: `p-${index}`,
+      patternKey: `grammar.articles.rule-${index}`,
+      explanation: `Rule ${index}`,
+    }));
+    const selected = patterns[500]!;
+    const value = JSON.parse(buildAnalysisPrompt(prompt, patterns, [{
+      explanation: selected.explanation,
+      memberPatternKeys: [selected.patternKey],
+    }]));
+
+    expect(value.knownPatterns).toHaveLength(500);
+    expect(value.knownPatterns[0].patternKey).toBe(selected.patternKey);
+    expect(value.priorityPatternKeys).toEqual([selected.patternKey]);
+    expect(value.knownPatterns.some((item: { patternKey: string }) => item.patternKey === "grammar.articles.rule-499")).toBe(false);
+  });
+
   it("accepts valid output, normalizes unknown error types, and filters low confidence", () => {
     const result = validateAnalysisResult({
       ...rawResult,

@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { AnalyzerConfigurationError, type Analyzer } from "../extensions/pi-fluency/analyzer.js";
-import { FluencyWorker, type WorkerOptions } from "../extensions/pi-fluency/worker.js";
+import { AnalyzerCoordinator, FluencyWorker, type WorkerOptions } from "../extensions/pi-fluency/worker.js";
 import type { AnalysisResult, CollectedPrompt } from "../extensions/pi-fluency/types.js";
 
 interface Deferred<T> {
@@ -184,6 +184,143 @@ describe("FluencyWorker", () => {
     await worker.shutdown();
     await expect(draining).resolves.toBeUndefined();
     expect(worker.getSnapshot()).toMatchObject({ queued: 0, running: false, shuttingDown: true });
+  });
+
+  it("yields between background items for foreground priority and reuses full result outside queue", async () => {
+    const coordinator = new AnalyzerCoordinator();
+    const firstBackground = createDeferred<AnalysisResult>();
+    const backgroundAnalyzer: Analyzer = {
+      analyze: vi.fn()
+        .mockImplementationOnce(() => firstBackground.promise)
+        .mockResolvedValueOnce(emptyResult),
+    };
+    const foregroundResult: AnalysisResult = {
+      ...emptyResult,
+      mistakes: [{
+        original: "an agent", correction: "a agent", contextScope: "sentence",
+        explanation: "Selected", errorType: "R:DET", patternKey: "grammar.article.rule",
+        confidence: 0.95, sourceExcerpt: "an agent", correctedExcerpt: "a agent",
+      }],
+    };
+    const foregroundAnalyzer: Analyzer = { analyze: vi.fn().mockResolvedValue(foregroundResult) };
+    const onResult = vi.fn().mockResolvedValue(undefined);
+    const worker = makeWorker({ coordinator, analyzer: backgroundAnalyzer, onResult });
+    worker.enqueue(prompt("background-one"));
+    worker.enqueue(prompt("background-two"));
+    const draining = worker.drain();
+
+    const foreground = worker.analyzeForeground({
+      analyzer: foregroundAnalyzer,
+      prompt: prompt("foreground"),
+      patterns: [],
+      deadline: Date.now() + 1_000,
+    });
+    firstBackground.resolve(emptyResult);
+    await expect(foreground).resolves.toEqual({ kind: "success", result: foregroundResult });
+    expect(foregroundAnalyzer.analyze).toHaveBeenCalledOnce();
+    expect(vi.mocked(foregroundAnalyzer.analyze).mock.invocationCallOrder[0])
+      .toBeLessThan(vi.mocked(backgroundAnalyzer.analyze).mock.invocationCallOrder[1]!);
+
+    await draining;
+    expect(backgroundAnalyzer.analyze).toHaveBeenCalledTimes(2);
+    expect(onResult).toHaveBeenCalledTimes(2);
+  });
+
+  it("rebuilds background analyzer only when fresh result fingerprint changes", async () => {
+    const first: Analyzer = { analyze: vi.fn().mockResolvedValue(emptyResult) };
+    const second: Analyzer = { analyze: vi.fn().mockResolvedValue(emptyResult) };
+    let configuration = { fingerprint: "one", analyzer: first };
+    const getAnalyzerConfiguration = vi.fn(() => configuration);
+    const worker = makeWorker({
+      coordinator: new AnalyzerCoordinator(),
+      analyzer: first,
+      getAnalyzerConfiguration,
+    });
+    worker.enqueue(prompt("one"));
+    await worker.drain();
+    configuration = { fingerprint: "one", analyzer: second };
+    worker.enqueue(prompt("same"));
+    await worker.drain();
+    configuration = { fingerprint: "two", analyzer: second };
+    worker.enqueue(prompt("changed"));
+    await worker.drain();
+
+    expect(first.analyze).toHaveBeenCalledTimes(2);
+    expect(second.analyze).toHaveBeenCalledOnce();
+    expect(getAnalyzerConfiguration).toHaveBeenCalledTimes(3);
+  });
+
+  it("bounds abort-ignoring foreground calls, quarantines overlap, and clears on settlement", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(1_000);
+    try {
+      const coordinator = new AnalyzerCoordinator();
+      const owner = coordinator.attachOwner();
+      const hung = createDeferred<AnalysisResult>();
+      const analyzer: Analyzer = { analyze: vi.fn(() => hung.promise) };
+      const outcome = coordinator.analyzeForeground({
+        owner,
+        analyzer,
+        prompt: prompt("hung"),
+        patterns: [],
+        deadline: Date.now() + 6_000,
+      });
+
+      await vi.advanceTimersByTimeAsync(6_100);
+      await expect(outcome).resolves.toEqual({ kind: "timeout" });
+      expect(coordinator.isQuarantined()).toBe(true);
+      const nextOwner = coordinator.attachOwner();
+      await expect(coordinator.analyzeForeground({
+        owner: nextOwner,
+        analyzer: { analyze: vi.fn().mockResolvedValue(emptyResult) },
+        prompt: prompt("next"),
+        patterns: [],
+        deadline: Date.now() + 6_000,
+      })).resolves.toEqual({ kind: "quarantined" });
+
+      hung.resolve(emptyResult);
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(coordinator.isQuarantined()).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("revokes only shutting-down owner and discards its late result across reload", async () => {
+    vi.useFakeTimers();
+    try {
+      const coordinator = new AnalyzerCoordinator();
+      const oldOwner = coordinator.attachOwner();
+      const hung = createDeferred<AnalysisResult>();
+      const oldOutcome = coordinator.analyzeForeground({
+        owner: oldOwner,
+        analyzer: { analyze: vi.fn(() => hung.promise) },
+        prompt: prompt("old"),
+        patterns: [],
+        deadline: Date.now() + 6_000,
+      });
+      const shutdown = coordinator.shutdownOwner(oldOwner);
+      await vi.advanceTimersByTimeAsync(100);
+      await shutdown;
+      await expect(oldOutcome).resolves.toEqual({ kind: "shutdown" });
+      expect(coordinator.isQuarantined()).toBe(true);
+
+      const newOwner = coordinator.attachOwner();
+      await expect(coordinator.analyzeForeground({
+        owner: newOwner,
+        analyzer: { analyze: vi.fn().mockResolvedValue(emptyResult) },
+        prompt: prompt("new"),
+        patterns: [],
+        deadline: Date.now() + 1_000,
+      })).resolves.toEqual({ kind: "quarantined" });
+      hung.resolve(emptyResult);
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(coordinator.isQuarantined()).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("clears active state when callbacks fail so later drains recover", async () => {
