@@ -37,6 +37,7 @@ const STATUS_KEY = "pi-fluency";
 const USAGE = "Usage: /fluency [pause|resume|status|model|clear|stats|practice [on|off|resume|reset]]";
 const PRACTICE_DISCLOSURE = "Before main submission, full sanitized draft goes to configured Fluency model and may be analyzed even if you later choose not to send it.";
 const PRACTICE_CHECK_TIMEOUT_MS = 12_000;
+const PRACTICE_CHECK_ABORT_GRACE_MS = 100;
 
 function practiceFailureMessage(kind: Exclude<ForegroundAnalysisOutcome["kind"], "success">): string {
   switch (kind) {
@@ -512,6 +513,7 @@ function registerHandlers(pi: ExtensionAPI, dependencies: ResolvedDependencies):
   pi.on("input", async (event, ctx) => {
     const handlerStartedAt = Date.now();
     const foregroundDeadline = handlerStartedAt + PRACTICE_CHECK_TIMEOUT_MS;
+    const foregroundCoordinatorDeadline = foregroundDeadline - PRACTICE_CHECK_ABORT_GRACE_MS;
     if (shuttingDown || event.source !== "interactive") return;
     ctxRef = ctx;
     const collected = collectPrompt(event.text, dependencies.now());
@@ -669,13 +671,13 @@ function registerHandlers(pi: ExtensionAPI, dependencies: ResolvedDependencies):
           prompt,
           patterns: context.patterns,
           selectedTargets: context.targetDescriptors,
-          deadline: foregroundDeadline,
+          deadline: foregroundCoordinatorDeadline,
           signal: attemptController.signal,
-          abortGraceMs: 100,
+          abortGraceMs: PRACTICE_CHECK_ABORT_GRACE_MS,
           authorize: async () => {
             let fresh;
             try {
-              fresh = await store.getFreshPolicySnapshot(foregroundDeadline, attemptController.signal);
+              fresh = await store.getFreshPolicySnapshot(foregroundCoordinatorDeadline, attemptController.signal);
             } catch (error) {
               policyReadFailed = true;
               technicalFailureMessage = "Sent without practice check — policy unavailable.";

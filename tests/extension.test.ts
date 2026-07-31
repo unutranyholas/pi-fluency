@@ -1238,10 +1238,10 @@ describe("Pi Fluency extension", () => {
     }
   });
 
-  it("fails open after 12-second foreground timeout through public extension seam", async () => {
+  it("fails open within the 12-second foreground cap including abort grace", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(20_000);
-    const harness = await createExtensionHarness({ enabled: true, analyzerMode: "wait-for-abort" });
+    const harness = await createExtensionHarness({ enabled: true, analyzerMode: "wait-for-abort-cleanup" });
     const store = await FluencyStore.open(harness.deps.rootDir);
     await store.activatePractice(2, {
       explanation: oneMistake.mistakes[0]!.explanation,
@@ -1253,15 +1253,31 @@ describe("Pi Fluency extension", () => {
     });
     try {
       createFluencyExtension({ ...harness.deps, showCoaching })(harness.pi);
+      let settled = false;
+      const handlerStartedAt = Date.now();
       const input = harness.emitInput("I made an mistake until foreground timeout.");
+      void input.then(() => { settled = true; });
       await vi.waitFor(() => expect(harness.analyzer.analyze).toHaveBeenCalledOnce());
-      await vi.advanceTimersByTimeAsync(12_100);
-      expect(await input).toEqual({ action: "continue" });
+
+      await vi.advanceTimersByTimeAsync(handlerStartedAt + 11_899 - Date.now());
+      expect(settled).toBe(false);
+      expect(harness.abortObserved).toBe(false);
+      await vi.advanceTimersByTimeAsync(1);
       expect(harness.abortObserved).toBe(true);
+      expect(settled).toBe(false);
+      await vi.advanceTimersByTimeAsync(100);
+
+      await expect(input).resolves.toEqual({ action: "continue" });
+      expect(Date.now()).toBe(handlerStartedAt + 12_000);
+      expect(settled).toBe(true);
+      expect(harness.cleanupFinished).toBe(false);
       expect(harness.notifications.at(-1)?.message).toBe(
         "Sent without practice check — analyzer timed out after 12 seconds.",
       );
     } finally {
+      harness.finishAbortCleanup();
+      await Promise.resolve();
+      await Promise.resolve();
       vi.useRealTimers();
     }
   });
